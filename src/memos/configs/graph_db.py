@@ -242,21 +242,33 @@ class PostgresGraphDBConfig(BaseConfig):
 
 
 class HugeGraphDBConfig(BaseConfig):
-    """Configuration for a fixed-schema Apache HugeGraph memory graph."""
+    """
+    Configuration for Apache HugeGraph backend using hugegraph-python (pyhugegraph).
 
-    url: str = Field(..., description="HugeGraph REST endpoint, without graphspace path")
-    graphspace: str = Field(..., description="HugeGraph graphspace")
+    Schema must be created manually before use.
+    Run docker/hugegraph-schema.groovy in Gremlin Console or HugeGraph Studio.
+
+    Example:
+    ---
+    ip = "127.0.0.1"
+    port = 8080
+    graph = "hugegraph"
+    graphspace = "DEFAULT"
+    user = "admin"
+    password = "admin"
+    user_name = "alice"
+    """
+
+    ip: str = Field(..., description="HugeGraph server IP or hostname")
+    port: int = Field(default=8080, description="HugeGraph server port")
     graph: str = Field(..., description="HugeGraph graph name")
-    user: str | None = Field(default=None, description="Optional HugeGraph user")
-    password: str | None = Field(default=None, description="Optional HugeGraph password")
+    graphspace: str | None = Field(default=None, description="HugeGraph graphspace (optional)")
+    user: str | None = Field(default=None, description="HugeGraph username")
+    password: str | None = Field(default=None, description="HugeGraph password")
     user_name: str = Field(..., description="Logical MemOS tenant identifier")
-    request_timeout: float = Field(default=10.0, gt=0, description="HTTP timeout in seconds")
-    auto_create_schema: bool = Field(
-        default=False, description="Create fixed labels and indexes when absent"
-    )
     vec_config: dict[str, Any] | None = Field(
         default=None,
-        description="Optional vector store used for embedding recall; graph data remains in HugeGraph",
+        description="Optional vector store config for embedding search",
     )
 
     @field_validator("vec_config", mode="before")
@@ -273,8 +285,8 @@ class HugeGraphDBConfig(BaseConfig):
     def validate_config(self):
         if bool(self.user) != bool(self.password):
             raise ValueError("HugeGraph `user` and `password` must be provided together")
-        if not self.url.strip() or not self.graphspace.strip() or not self.graph.strip():
-            raise ValueError("HugeGraph `url`, `graphspace`, and `graph` must not be empty")
+        if not self.ip.strip() or not self.graph.strip():
+            raise ValueError("HugeGraph `ip` and `graph` must not be empty")
         return self
 
 

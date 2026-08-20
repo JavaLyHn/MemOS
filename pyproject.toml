@@ -77,8 +77,10 @@ tree-mem = [
     "schedule (>=1.2.2,<2.0.0)",  # Task scheduling
 ]
 
-# HugeGraph graph backend (no extra install needed — uses stdlib urllib only)
-hugegraph = []
+# HugeGraph graph backend
+hugegraph = [
+    "hugegraph-python (>=0.1.1)",  # pyhugegraph client
+]
 
 # MemScheduler
 mem-scheduler = [

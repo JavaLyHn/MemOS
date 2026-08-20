@@ -1,599 +1,666 @@
-"""Minimal fixed-schema Apache HugeGraph backend for MemOS graph memories."""
+"""HugeGraph backend for MemOS using the official hugegraph-python client."""
 
-import base64
-import gzip
 import json
 
-from collections import deque
+from datetime import datetime
 from typing import Any, Literal
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
 
 from memos.configs.graph_db import HugeGraphDBConfig
-from memos.configs.vec_db import VectorDBConfigFactory
-from memos.exceptions import MemoryError
+from memos.dependency import require_python_package
 from memos.graph_dbs.base import BaseGraphDB
 from memos.log import get_logger
-from memos.vec_dbs.factory import VecDBFactory
-from memos.vec_dbs.item import VecDBItem
 
 
 logger = get_logger(__name__)
 
+_VERTEX_LABEL = "Memory"
+_EDGE_LABEL = "MEMORY_RELATION"
+_RELATION_TYPE_KEY = "relation_type"
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _pack_metadata(metadata: dict[str, Any]) -> str:
+    reserved = {"memory_type", "status", "user_name", "embedding", "created_at", "updated_at"}
+    return json.dumps({k: v for k, v in metadata.items() if k not in reserved},
+                      ensure_ascii=False, default=str)
+
+
+def _unpack_node(props: dict[str, Any], include_embedding: bool = False) -> dict[str, Any]:
+    node_id = props.get("id", "")
+    memory = props.get("memory", "")
+    metadata: dict[str, Any] = {}
+    try:
+        metadata.update(json.loads(props.get("metadata_json") or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        pass
+    for key in ("memory_type", "status", "user_name", "created_at", "updated_at"):
+        if props.get(key):
+            metadata[key] = props[key]
+    if include_embedding and props.get("embedding_json"):
+        try:
+            metadata["embedding"] = json.loads(props["embedding_json"])
+        except (TypeError, json.JSONDecodeError):
+            pass
+    return {"id": node_id, "memory": memory, "metadata": metadata}
+
 
 class HugeGraphGraphDB(BaseGraphDB):
-    """REST-backed HugeGraph provider using one fixed vertex and edge label."""
+    """HugeGraph-backed graph memory store using pyhugegraph (hugegraph-python)."""
 
-    node_label = "Memory"
-    edge_label = "MEMORY_RELATION"
-    node_property_keys = ("id", "memory", "user_name", "memory_type", "status", "metadata_json")
-
+    @require_python_package(
+        import_name="pyhugegraph",
+        install_command="pip install hugegraph-python",
+        install_link="https://github.com/apache/hugegraph-ai",
+    )
     def __init__(self, config: HugeGraphDBConfig):
+        from pyhugegraph.client import PyHugeClient
+
         self.config = config
         self.user_name = config.user_name
-        vec_config = (
-            VectorDBConfigFactory.model_validate(config.vec_config) if config.vec_config else None
+        self._client = PyHugeClient(
+            ip=config.ip,
+            port=str(config.port),
+            graph=config.graph,
+            user=config.user or "",
+            pwd=config.password or "",
+            graphspace=config.graphspace or None,
         )
-        self.vec_db = VecDBFactory.from_config(vec_config) if vec_config else None
-        self.base_url = (
-            f"{config.url.rstrip('/')}/graphspaces/{quote(config.graphspace, safe='')}"
-            f"/graphs/{quote(config.graph, safe='')}"
+        self._g = self._client.graph()
+        self._gremlin = self._client.gremlin()
+
+        # optional vector DB for embedding search
+        vec_cfg = (
+            VectorDBConfigFactory.model_validate(config.vec_config)
+            if config.vec_config
+            else None
         )
-        if config.auto_create_schema:
-            self.ensure_schema()
+        if vec_cfg:
+            from memos.vec_dbs.factory import VecDBFactory
+            from memos.configs.vec_db import VectorDBConfigFactory  # noqa: F811
+            self._vec_db = VecDBFactory.from_config(vec_cfg)
+        else:
+            self._vec_db = None
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        payload: dict[str, Any] | None = None,
-        params: dict[str, str] | None = None,
-        allow_not_found: bool = False,
-    ) -> dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        if params:
-            url = f"{url}?{urlencode(params)}"
-        headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
-        data = None
-        if payload is not None:
-            data = json.dumps(payload, separators=(",", ":")).encode()
-            headers["Content-Type"] = "application/json"
-        if self.config.user:
-            token = base64.b64encode(f"{self.config.user}:{self.config.password}".encode()).decode()
-            headers["Authorization"] = f"Basic {token}"
-        try:
-            with urlopen(
-                Request(url, data=data, headers=headers, method=method),
-                timeout=self.config.request_timeout,
-            ) as response:
-                raw_bytes = response.read()
-                if response.headers.get("Content-Encoding", "").lower() == "gzip":
-                    raw_bytes = gzip.decompress(raw_bytes)
-                raw = raw_bytes.decode()
-        except HTTPError as error:
-            if allow_not_found and error.code == 404:
-                return {}
-            body = error.read().decode(errors="replace")[:300]
-            raise MemoryError(f"HugeGraph request failed: HTTP {error.code}: {body}") from error
-        except URLError as error:
-            raise MemoryError(f"HugeGraph request failed: {error.reason}") from error
-        if not raw:
-            return {}
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as error:
-            raise MemoryError("HugeGraph returned a non-JSON response") from error
-
-    @staticmethod
-    def _vertex_path(vertex_id: str) -> str:
-        return f"/graph/vertices/{quote(json.dumps(vertex_id), safe='')}"
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _tenant(self, user_name: str | None = None) -> str:
         return user_name or self.user_name
 
-    def _vertices(self, properties: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        params: dict[str, str] = {"label": self.node_label, "limit": "1000"}
-        if properties:
-            params["properties"] = json.dumps(properties, separators=(",", ":"))
-        return self._request("GET", "/graph/vertices", params=params).get("vertices", [])
+    def _gremlin_exec(self, query: str, bindings: dict | None = None) -> list:
+        result = self._gremlin.exec(query)
+        if result is None:
+            return []
+        if isinstance(result, list):
+            return result
+        return [result]
 
-    def _find_raw_node(self, node_id: str, user_name: str | None = None) -> dict[str, Any] | None:
-        for vertex in self._vertices({"id": node_id}):
-            if vertex.get("properties", {}).get("user_name") == self._tenant(user_name):
-                return vertex
-        return None
+    def _get_vertex_by_node_id(self, node_id: str, user_name: str | None = None) -> dict | None:
+        tenant = self._tenant(user_name)
+        q = (
+            f"g.V().hasLabel('{_VERTEX_LABEL}')"
+            f".has('id', '{node_id}')"
+            f".has('user_name', '{tenant}')"
+            f".valueMap(true).limit(1)"
+        )
+        rows = self._gremlin_exec(q)
+        if not rows:
+            return None
+        return self._parse_valuemap(rows[0])
 
     @staticmethod
-    def _metadata(properties: dict[str, Any]) -> dict[str, Any]:
-        try:
-            metadata = json.loads(properties.get("metadata_json", "{}"))
-        except (TypeError, json.JSONDecodeError):
-            metadata = {}
-        metadata.update(
-            {key: properties.get(key, "") for key in ("memory_type", "status", "user_name")}
-        )
-        return metadata
+    def _parse_valuemap(row: dict) -> dict[str, Any]:
+        """Flatten gremlin valueMap(true) result into a plain dict."""
+        result: dict[str, Any] = {}
+        for k, v in row.items():
+            if k in ("id", "label"):
+                result[k] = v
+            elif isinstance(v, list):
+                result[k] = v[0] if len(v) == 1 else v
+            else:
+                result[k] = v
+        return result
 
-    def _node_dict(self, vertex: dict[str, Any]) -> dict[str, Any]:
-        properties = vertex.get("properties", {})
-        return {
-            "id": properties["id"],
-            "memory": properties.get("memory", ""),
-            "metadata": self._metadata(properties),
-        }
+    # ------------------------------------------------------------------
+    # Node Management
+    # ------------------------------------------------------------------
 
-    def _node_properties(
-        self, memory: str, metadata: dict[str, Any], user_name: str
-    ) -> dict[str, Any]:
-        stored = metadata.copy()
-        for key in ("user_name", "memory_type", "status"):
-            stored.pop(key, None)
-        return {
-            "memory": memory,
-            "user_name": user_name,
-            "memory_type": str(metadata.get("memory_type", "")),
-            "status": str(metadata.get("status", "activated")),
-            "metadata_json": json.dumps(stored, ensure_ascii=False, separators=(",", ":")),
-        }
-
-    def ensure_schema(self) -> None:
-        """Create only the stable labels, keys, and indexes required by this provider."""
-        schema = self._request("GET", "/schema")
-        existing = {
-            kind: {item["name"] for item in schema.get(kind, [])}
-            for kind in ("propertykeys", "vertexlabels", "edgelabels", "indexlabels")
-        }
-        for name in (*self.node_property_keys, "relation_type"):
-            if name not in existing["propertykeys"]:
-                self._request(
-                    "POST",
-                    "/schema/propertykeys",
-                    {"name": name, "data_type": "TEXT", "cardinality": "SINGLE"},
-                )
-        if self.node_label not in existing["vertexlabels"]:
-            self._request(
-                "POST",
-                "/schema/vertexlabels",
-                {
-                    "name": self.node_label,
-                    "id_strategy": "PRIMARY_KEY",
-                    "properties": list(self.node_property_keys),
-                    "primary_keys": ["id"],
-                    "nullable_keys": [name for name in self.node_property_keys if name != "id"],
-                },
-            )
-        if self.edge_label not in existing["edgelabels"]:
-            self._request(
-                "POST",
-                "/schema/edgelabels",
-                {
-                    "name": self.edge_label,
-                    "source_label": self.node_label,
-                    "target_label": self.node_label,
-                    "frequency": "MULTIPLE",
-                    "properties": ["relation_type", "user_name"],
-                    "sort_keys": ["relation_type"],
-                    "nullable_keys": ["user_name"],
-                },
-            )
-        indexes = (
-            ("memos_memory_by_user", "VERTEX_LABEL", self.node_label, "SECONDARY", ["user_name"]),
-            (
-                "memos_memory_by_scope_status",
-                "VERTEX_LABEL",
-                self.node_label,
-                "SECONDARY",
-                ["memory_type", "status"],
-            ),
-            ("memos_relation_by_user", "EDGE_LABEL", self.edge_label, "SECONDARY", ["user_name"]),
-        )
-        for name, base_type, base_value, index_type, fields in indexes:
-            if name not in existing["indexlabels"]:
-                self._request(
-                    "POST",
-                    "/schema/indexlabels",
-                    {
-                        "name": name,
-                        "base_type": base_type,
-                        "base_value": base_value,
-                        "index_type": index_type,
-                        "fields": fields,
-                    },
-                )
-
-    def add_node(
-        self, id: str, memory: str, metadata: dict[str, Any], user_name: str | None = None
-    ) -> None:
+    def add_node(self, id: str, memory: str, metadata: dict[str, Any],
+                 user_name: str | None = None) -> None:
         tenant = self._tenant(user_name)
-        metadata = metadata.copy()
-        embedding = metadata.pop("embedding", None)
-        if embedding is not None:
-            if self.vec_db is None:
-                raise MemoryError(
-                    "HugeGraph received an embedding but no vector store is configured"
-                )
-            metadata["vector_sync"] = "success"
-            try:
-                self.vec_db.add(
-                    [
-                        VecDBItem(
-                            id=id,
-                            vector=embedding,
-                            payload={"memory": memory, "user_name": tenant, **metadata},
-                        )
-                    ]
-                )
-            except Exception as error:
-                raise MemoryError(
-                    f"HugeGraph vector write failed for memory {id}: {error}"
-                ) from error
-        elif self.vec_db is not None:
-            metadata["vector_sync"] = "skipped"
-        existing = self._find_raw_node(id, tenant)
-        properties = self._node_properties(memory, metadata, tenant)
-        if existing:
-            self._request(
-                "PUT",
-                f"{self._vertex_path(existing['id'])}?action=append",
-                {"label": self.node_label, "properties": properties},
-            )
+        meta = metadata.copy()
+        embedding = meta.pop("embedding", None)
+
+        props = {
+            "id": id,
+            "memory": memory,
+            "user_name": tenant,
+            "memory_type": meta.get("memory_type", ""),
+            "status": meta.get("status", ""),
+            "created_at": meta.get("created_at", _now_iso()),
+            "updated_at": meta.get("updated_at", _now_iso()),
+            "metadata_json": _pack_metadata(meta),
+            "embedding_json": json.dumps(
+                [float(x) for x in embedding], ensure_ascii=False
+            ) if embedding else "",
+        }
+
+        self._g.addVertex(_VERTEX_LABEL, props, id=id)
+
+        if embedding and self._vec_db:
+            from memos.vec_dbs.item import VecDBItem
+            self._vec_db.add_item(VecDBItem(id=id, vector=embedding, payload={"user_name": tenant}))
+
+    def add_nodes_batch(self, nodes: list[dict[str, Any]],
+                        user_name: str | None = None) -> None:
+        if not nodes:
             return
-        if self._vertices({"id": id}):
-            raise MemoryError(f"Memory node id {id!r} already belongs to another tenant")
-        properties["id"] = id
-        self._request(
-            "POST", "/graph/vertices", {"label": self.node_label, "properties": properties}
-        )
+        tenant = self._tenant(user_name)
+        batch = []
+        vec_items = []
 
-    def add_nodes_batch(self, nodes: list[dict[str, Any]], user_name: str | None = None) -> None:
         for node in nodes:
-            self.add_node(node["id"], node.get("memory", ""), node.get("metadata", {}), user_name)
+            nid = node["id"]
+            memory = node["memory"]
+            meta = node.get("metadata", {}).copy()
+            embedding = meta.pop("embedding", None)
+            props = {
+                "id": nid,
+                "memory": memory,
+                "user_name": tenant,
+                "memory_type": meta.get("memory_type", ""),
+                "status": meta.get("status", ""),
+                "created_at": meta.get("created_at", _now_iso()),
+                "updated_at": meta.get("updated_at", _now_iso()),
+                "metadata_json": _pack_metadata(meta),
+                "embedding_json": json.dumps(
+                    [float(x) for x in embedding], ensure_ascii=False
+                ) if embedding else "",
+            }
+            batch.append((_VERTEX_LABEL, props))
+            if embedding and self._vec_db:
+                from memos.vec_dbs.item import VecDBItem
+                vec_items.append(VecDBItem(id=nid, vector=embedding,
+                                           payload={"user_name": tenant}))
 
-    def update_node(self, id: str, fields: dict[str, Any], user_name: str | None = None) -> None:
-        node = self.get_node(id, include_embedding=True, user_name=user_name)
-        if node is None:
-            raise MemoryError(f"Memory node not found: {id}")
-        values = fields.copy()
-        metadata = node["metadata"]
-        metadata.update(values.pop("metadata", {}))
-        for key in ("memory_type", "status"):
-            if key in values:
-                metadata[key] = values.pop(key)
-        self.add_node(id, values.pop("memory", node["memory"]), metadata, user_name)
+        self._g.addVertices(batch)
+        if vec_items and self._vec_db:
+            self._vec_db.add_items(vec_items)
+
+    def update_node(self, id: str, fields: dict[str, Any],
+                    user_name: str | None = None) -> None:
+        tenant = self._tenant(user_name)
+        fields = fields.copy()
+        embedding = fields.pop("embedding", None)
+
+        props = {}
+        direct_keys = {"memory_type", "status", "created_at", "updated_at", "memory"}
+        for k in direct_keys:
+            if k in fields:
+                props[k] = fields.pop(k)
+        props["updated_at"] = _now_iso()
+
+        # Re-fetch existing metadata_json to merge
+        existing = self._get_vertex_by_node_id(id, user_name)
+        if existing:
+            try:
+                current_meta = json.loads(existing.get("metadata_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                current_meta = {}
+            current_meta.update(fields)
+            props["metadata_json"] = json.dumps(current_meta, ensure_ascii=False, default=str)
+
+        if embedding:
+            props["embedding_json"] = json.dumps([float(x) for x in embedding],
+                                                  ensure_ascii=False)
+
+        self._g.appendVertex(id, props)
 
     def delete_node(self, id: str, user_name: str | None = None) -> None:
-        if vertex := self._find_raw_node(id, user_name):
-            self._request("DELETE", self._vertex_path(vertex["id"]))
-            if self.vec_db is not None:
-                try:
-                    self.vec_db.delete([id])
-                except Exception as error:
-                    raise MemoryError(
-                        f"HugeGraph vector delete failed for memory {id}: {error}"
-                    ) from error
-
-    def get_node(
-        self, id: str, include_embedding: bool = False, **kwargs: Any
-    ) -> dict[str, Any] | None:
-        vertex = self._find_raw_node(id, kwargs.get("user_name"))
-        if not vertex:
-            return None
-        node = self._node_dict(vertex)
-        if include_embedding and self.vec_db is not None:
+        self._g.removeVertexById(id)
+        if self._vec_db:
             try:
-                vector_item = self.vec_db.get_by_id(id)
-            except Exception as error:
-                raise MemoryError(
-                    f"HugeGraph vector read failed for memory {id}: {error}"
-                ) from error
-            if vector_item is not None:
-                node["metadata"]["embedding"] = vector_item.vector
-        return node
+                self._vec_db.delete_item(id)
+            except Exception:
+                pass
 
-    def get_nodes(
-        self, ids: list, include_embedding: bool = False, **kwargs: Any
-    ) -> list[dict[str, Any]]:
-        return [
-            node for node_id in ids if (node := self.get_node(node_id, include_embedding, **kwargs))
-        ]
+    # ------------------------------------------------------------------
+    # Edge Management
+    # ------------------------------------------------------------------
 
-    def _raw_edges(self, vertex: dict[str, Any], direction: str = "OUT") -> list[dict[str, Any]]:
-        return self._request(
-            "GET",
-            "/graph/edges",
-            params={
-                "vertex_id": json.dumps(vertex["id"]),
-                "direction": direction,
-                "label": self.edge_label,
-                "limit": "1000",
-            },
-        ).get("edges", [])
-
-    def _edge_matches(
-        self, source_id: str, target_id: str, relation_type: str, user_name: str | None = None
-    ) -> list[dict[str, Any]]:
-        source, target = (
-            self._find_raw_node(source_id, user_name),
-            self._find_raw_node(target_id, user_name),
-        )
-        if not source or not target:
-            return []
+    def add_edge(self, source_id: str, target_id: str, type: str,
+                 user_name: str | None = None) -> None:
         tenant = self._tenant(user_name)
-        return [
-            edge
-            for edge in self._raw_edges(source)
-            if edge.get("inV") == target["id"]
-            and edge.get("properties", {}).get("relation_type") == relation_type
-            and edge.get("properties", {}).get("user_name") == tenant
-        ]
+        self._g.addEdge(_EDGE_LABEL, source_id, target_id,
+                        {_RELATION_TYPE_KEY: type, "user_name": tenant})
 
-    def add_edge(
-        self, source_id: str, target_id: str, type: str, user_name: str | None = None
-    ) -> None:
-        source, target = (
-            self._find_raw_node(source_id, user_name),
-            self._find_raw_node(target_id, user_name),
-        )
-        if not source or not target:
-            raise MemoryError("Both relationship endpoints must exist in the same tenant")
-        if not self._edge_matches(source_id, target_id, type, user_name):
-            self._request(
-                "POST",
-                "/graph/edges",
-                {
-                    "label": self.edge_label,
-                    "outV": source["id"],
-                    "inV": target["id"],
-                    "properties": {"relation_type": type, "user_name": self._tenant(user_name)},
-                },
-            )
-
-    def delete_edge(
-        self, source_id: str, target_id: str, type: str, user_name: str | None = None
-    ) -> None:
-        for edge in self._edge_matches(source_id, target_id, type, user_name):
-            # HugeGraph edge IDs already carry their type information; unlike a
-            # string vertex ID, they must not be JSON-quoted in this path.
-            self._request("DELETE", f"/graph/edges/{quote(edge['id'], safe='')}")
-
-    def edge_exists(
-        self, source_id: str, target_id: str, type: str, user_name: str | None = None, **_: Any
-    ) -> bool:
-        return bool(self._edge_matches(source_id, target_id, type, user_name))
-
-    def _node_id_from_vertex_id(self, vertex_id: str) -> str | None:
-        data = self._request("GET", self._vertex_path(vertex_id), allow_not_found=True)
-        properties = data.get("properties", data.get("vertex", {}).get("properties", {}))
-        return properties.get("id")
-
-    def get_neighbors(
-        self,
-        id: str,
-        type: str,
-        direction: Literal["in", "out", "both"] = "out",
-        user_name: str | None = None,
-    ) -> list[str]:
-        vertex = self._find_raw_node(id, user_name)
-        if not vertex:
-            return []
-        raw_direction = {"in": "IN", "out": "OUT", "both": "BOTH"}[direction]
+    def delete_edge(self, source_id: str, target_id: str, type: str,
+                    user_name: str | None = None) -> None:
         tenant = self._tenant(user_name)
+        q = (
+            f"g.V('{source_id}').outE('{_EDGE_LABEL}')"
+            f".has('{_RELATION_TYPE_KEY}', '{type}')"
+            f".where(inV().hasId('{target_id}'))"
+            f".has('user_name', '{tenant}').drop()"
+        )
+        self._gremlin_exec(q)
+
+    def edge_exists(self, source_id: str, target_id: str, type: str,
+                    direction: str = "OUTGOING",
+                    user_name: str | None = None) -> bool:
+        tenant = self._tenant(user_name)
+        if direction == "OUTGOING":
+            q = (f"g.V('{source_id}').outE('{_EDGE_LABEL}')"
+                 f".has('{_RELATION_TYPE_KEY}', '{type}')"
+                 f".has('user_name', '{tenant}')"
+                 f".where(inV().hasId('{target_id}')).limit(1).count()")
+        elif direction == "INCOMING":
+            q = (f"g.V('{source_id}').inE('{_EDGE_LABEL}')"
+                 f".has('{_RELATION_TYPE_KEY}', '{type}')"
+                 f".has('user_name', '{tenant}')"
+                 f".where(outV().hasId('{target_id}')).limit(1).count()")
+        else:
+            q = (f"g.V('{source_id}').bothE('{_EDGE_LABEL}')"
+                 f".has('{_RELATION_TYPE_KEY}', '{type}')"
+                 f".has('user_name', '{tenant}')"
+                 f".where(otherV().hasId('{target_id}')).limit(1).count()")
+        result = self._gremlin_exec(q)
+        return bool(result and result[0])
+
+    # ------------------------------------------------------------------
+    # Node Queries
+    # ------------------------------------------------------------------
+
+    def get_node(self, id: str, include_embedding: bool = False,
+                 **kwargs) -> dict[str, Any] | None:
+        user_name = kwargs.get("user_name")
+        tenant = self._tenant(user_name)
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('id', '{id}')"
+             f".has('user_name', '{tenant}')"
+             f".valueMap(true).limit(1)")
+        rows = self._gremlin_exec(q)
+        if not rows:
+            return None
+        props = self._parse_valuemap(rows[0])
+        return _unpack_node(props, include_embedding)
+
+    def get_nodes(self, ids: list[str], **kwargs) -> list[dict[str, Any]]:
+        if not ids:
+            return []
+        vertices = self._g.getVerticesById(ids)
+        if not vertices:
+            return []
         result = []
-        for edge in self._raw_edges(vertex, raw_direction):
-            properties = edge.get("properties", {})
-            if properties.get("relation_type") != type or properties.get("user_name") != tenant:
-                continue
-            neighbor_id = edge["inV"] if edge["outV"] == vertex["id"] else edge["outV"]
-            if node_id := self._node_id_from_vertex_id(neighbor_id):
-                result.append(node_id)
+        for v in vertices:
+            if v and v.properties:
+                result.append(_unpack_node(v.properties))
         return result
 
-    def get_path(self, source_id: str, target_id: str, max_depth: int = 3) -> list[str]:
-        queue: deque[list[str]] = deque([[source_id]])
-        seen = {source_id}
-        while queue:
-            path = queue.popleft()
-            if path[-1] == target_id:
-                return path
-            if len(path) - 1 == max_depth:
-                continue
-            for neighbor in self.get_neighbors(path[-1], "RELATED", "both"):
-                if neighbor not in seen:
-                    seen.add(neighbor)
-                    queue.append([*path, neighbor])
+    def get_edges(self, id: str, type: str = "ANY", direction: str = "ANY",
+                  user_name: str | None = None) -> list[dict[str, str]]:
+        tenant = self._tenant(user_name)
+        edge_filter = f".hasLabel('{_EDGE_LABEL}')"
+        type_filter = "" if type == "ANY" else f".has('{_RELATION_TYPE_KEY}', '{type}')"
+        user_filter = f".has('user_name', '{tenant}')"
+
+        if direction == "OUTGOING":
+            q = f"g.V('{id}').outE(){edge_filter}{type_filter}{user_filter}.as('e').inV().as('t').select('e','t').by(valueMap(true))"
+        elif direction == "INCOMING":
+            q = f"g.V('{id}').inE(){edge_filter}{type_filter}{user_filter}.as('e').outV().as('s').select('e','s').by(valueMap(true))"
+        else:
+            q = (f"g.V('{id}').bothE(){edge_filter}{type_filter}{user_filter}"
+                 f".project('from','to','type')"
+                 f".by(outV().id()).by(inV().id()).by('{_RELATION_TYPE_KEY}')")
+
+        rows = self._gremlin_exec(q)
+        edges = []
+        for row in rows:
+            if isinstance(row, dict) and "from" in row:
+                edges.append({"from": row["from"], "to": row["to"], "type": row.get("type", "")})
+        return edges
+
+    def get_neighbors(self, id: str, type: str,
+                      direction: Literal["in", "out", "both"] = "out",
+                      user_name: str | None = None) -> list[str]:
+        tenant = self._tenant(user_name)
+        dir_map = {"out": "out", "in": "in", "both": "both"}
+        step = dir_map.get(direction, "out")
+        q = (f"g.V('{id}').{step}E('{_EDGE_LABEL}')"
+             f".has('{_RELATION_TYPE_KEY}', '{type}')"
+             f".has('user_name', '{tenant}')"
+             f".otherV().has('id').values('id')")
+        return self._gremlin_exec(q)
+
+    def get_path(self, source_id: str, target_id: str, max_depth: int = 3,
+                 user_name: str | None = None) -> list[str]:
+        q = (f"g.V('{source_id}').repeat(bothE('{_EDGE_LABEL}').otherV().simplePath())"
+             f".until(hasId('{target_id}').or().loops().is(gte({max_depth})))"
+             f".hasId('{target_id}').limit(1).path().by('id')")
+        rows = self._gremlin_exec(q)
+        if rows and isinstance(rows[0], dict):
+            return rows[0].get("objects", [])
         return []
 
-    def get_subgraph(self, center_id: str, depth: int = 2) -> list[str]:
-        seen, frontier = {center_id}, {center_id}
-        for _ in range(depth):
-            frontier = {
-                item
-                for node in frontier
-                for item in self.get_neighbors(node, "RELATED", "both")
-                if item not in seen
-            }
-            seen.update(frontier)
-        return list(seen)
+    def get_subgraph(self, center_id: str, depth: int = 2,
+                     user_name: str | None = None) -> dict[str, Any]:
+        tenant = self._tenant(user_name)
+        q = (f"g.V('{center_id}').repeat(bothE('{_EDGE_LABEL}').otherV().simplePath())"
+             f".emit().times({depth}).has('user_name', '{tenant}')"
+             f".path().by(valueMap(true)).by(valueMap(true))")
+        rows = self._gremlin_exec(q)
+
+        core_raw = self._get_vertex_by_node_id(center_id, user_name)
+        core_node = _unpack_node(core_raw) if core_raw else None
+        neighbors = []
+        edges = []
+        seen_nodes: set[str] = set()
+        seen_edges: set[tuple] = set()
+
+        for path in rows:
+            objs = path.get("objects", []) if isinstance(path, dict) else []
+            for obj in objs:
+                if isinstance(obj, dict):
+                    nid = obj.get("id", [None])
+                    if isinstance(nid, list):
+                        nid = nid[0] if nid else None
+                    if nid and nid != center_id and nid not in seen_nodes:
+                        seen_nodes.add(nid)
+                        neighbors.append(_unpack_node(self._parse_valuemap(obj)))
+                    # edge
+                    if "outV" in obj and "inV" in obj:
+                        edge_key = (obj["outV"], obj["inV"], obj.get(_RELATION_TYPE_KEY, ""))
+                        if edge_key not in seen_edges:
+                            seen_edges.add(edge_key)
+                            edges.append({"source": obj["outV"], "target": obj["inV"],
+                                          "type": obj.get(_RELATION_TYPE_KEY, "")})
+
+        return {"core_node": core_node, "neighbors": neighbors, "edges": edges}
 
     def get_context_chain(self, id: str, type: str = "FOLLOWS") -> list[str]:
-        chain = [id]
-        while (neighbors := self.get_neighbors(chain[-1], type)) and neighbors[0] not in chain:
-            chain.append(neighbors[0])
-        return chain
+        q = (f"g.V('{id}').repeat(outE('{_EDGE_LABEL}')"
+             f".has('{_RELATION_TYPE_KEY}', '{type}').inV().simplePath())"
+             f".emit().values('id')")
+        return self._gremlin_exec(q)
 
-    def search_by_embedding(
-        self,
-        vector: list[float],
-        top_k: int = 5,
-        return_fields: list[str] | None = None,
-        **kwargs: Any,
-    ) -> list[dict]:
-        """Retrieve vector candidates and use their IDs to address HugeGraph nodes."""
-        if self.vec_db is None:
-            return []
-        vector_filter: dict[str, Any] = {
-            "user_name": kwargs.get("cube_name") or kwargs.get("user_name") or self.user_name,
-            "vector_sync": "success",
-        }
-        if scope := kwargs.get("scope"):
-            vector_filter["memory_type"] = scope
-        if status := kwargs.get("status"):
-            vector_filter["status"] = status
-        try:
-            results = self.vec_db.search(vector, top_k, filter=vector_filter)
-        except Exception as error:
-            raise MemoryError(f"HugeGraph vector search failed: {error}") from error
-        threshold = kwargs.get("threshold")
-        candidates = [
-            item
-            for item in results
-            if threshold is None or item.score is None or item.score >= threshold
-        ]
-        if not return_fields:
-            return [{"id": item.id, "score": item.score} for item in candidates]
+    # ------------------------------------------------------------------
+    # Search / Recall
+    # ------------------------------------------------------------------
 
-        user_name = kwargs.get("cube_name") or kwargs.get("user_name") or self.user_name
-        field_aliases = {"source": "sources", "internal_info": "info"}
-        hydrated_results: list[dict[str, Any]] = []
-        for item in candidates:
-            node = self.get_node(item.id, user_name=user_name)
-            if node is None:
-                logger.warning("Vector hit %s has no matching HugeGraph node", item.id)
-                continue
-            result: dict[str, Any] = {"id": item.id, "score": item.score}
-            metadata = node["metadata"]
-            for field in return_fields:
-                if field in {"id", "score"}:
-                    continue
-                if field == "memory":
-                    result[field] = node["memory"]
-                    continue
-                value = metadata.get(field, metadata.get(field_aliases.get(field, "")))
-                if value is not None:
-                    result[field] = value
-            hydrated_results.append(result)
-        return hydrated_results
-
-    @staticmethod
-    def _matches_filters(metadata: dict[str, Any], filters: list[dict[str, Any]]) -> bool:
-        for item in filters:
-            field, op, value = item.get("field"), item.get("op", "="), item.get("value")
-            actual = metadata.get(field)
-            if op in ("=", "eq") and actual != value:
-                return False
-            if op == "in" and actual not in value:
-                return False
-            if op == "contains" and value not in (actual or []):
-                return False
-        return True
-
-    def get_by_metadata(
-        self, filters: list[dict[str, Any]], status: str | None = None, user_name: str | None = None
-    ) -> list[str]:
-        return [
-            node["id"]
-            for node in self.get_all_memory_items("", status=status, user_name=user_name)
-            if self._matches_filters(node["metadata"], filters)
-        ]
-
-    def get_all_memory_items(
-        self,
-        scope: str,
-        include_embedding: bool = False,
-        status: str | None = None,
-        user_name: str | None = None,
-        filter: dict[str, Any] | None = None,
-    ) -> list[dict]:
-        properties: dict[str, Any] = {"user_name": self._tenant(user_name)}
-        if scope:
-            properties["memory_type"] = scope
-        if status:
-            properties["status"] = status
-        nodes = [self._node_dict(vertex) for vertex in self._vertices(properties)]
-        if filter:
-            nodes = [
-                node
-                for node in nodes
-                if all(node["metadata"].get(key) == value for key, value in filter.items())
-            ]
-        return nodes
-
-    def get_structure_optimization_candidates(
-        self, scope: str, include_embedding: bool = False
-    ) -> list[dict]:
-        return self.get_all_memory_items(scope, include_embedding, status="activated")
-
-    def clear(self) -> None:
-        for node in self.get_all_memory_items(""):
-            self.delete_node(node["id"])
-
-    def export_graph(self, include_embedding: bool = False) -> dict[str, Any]:
-        nodes = self.get_all_memory_items("")
-        edges = []
-        for node in nodes:
-            for relation_type in ("RELATED", "PARENT"):
-                for target in self.get_neighbors(node["id"], relation_type):
-                    edges.append({"source": node["id"], "target": target, "type": relation_type})
-        return {"nodes": nodes, "edges": edges}
-
-    def import_graph(self, data: dict[str, Any]) -> None:
-        self.add_nodes_batch(data.get("nodes", []))
-        for edge in data.get("edges", []):
-            self.add_edge(edge["source"], edge["target"], edge["type"])
-
-    def deduplicate_nodes(self) -> None:
-        return None
-
-    def detect_conflicts(self) -> list[tuple[str, str]]:
-        return []
-
-    def merge_nodes(self, id1: str, id2: str) -> str:
-        raise MemoryError("HugeGraph minimal provider does not merge nodes")
-
-    def remove_oldest_memory(
-        self, memory_type: str, keep_latest: int, user_name: str | None = None
-    ) -> None:
-        nodes = self.get_all_memory_items(memory_type, user_name=user_name)
-        for node in sorted(nodes, key=lambda item: item["metadata"].get("updated_at", ""))[
-            :-keep_latest
-        ]:
-            self.delete_node(node["id"], user_name)
-
-    def get_edges(self, source_id: str, user_name: str | None = None) -> list[dict[str, str]]:
-        source = self._find_raw_node(source_id, user_name)
-        if not source:
+    def search_by_embedding(self, vector: list[float], top_k: int = 5,
+                             scope: str | None = None, status: str | None = None,
+                             threshold: float | None = None,
+                             user_name: str | None = None,
+                             return_fields: list[str] | None = None,
+                             **kwargs) -> list[dict]:
+        if self._vec_db is None:
+            logger.warning("[search_by_embedding] no vec_db configured, returning empty")
             return []
         tenant = self._tenant(user_name)
-        result = []
-        for edge in self._raw_edges(source):
-            if edge.get("properties", {}).get("user_name") != tenant:
+        payload_filter = {"user_name": tenant}
+        if scope:
+            payload_filter["memory_type"] = scope
+        if status:
+            payload_filter["status"] = status
+
+        raw = self._vec_db.search(vector, top_k=top_k, payload_filter=payload_filter)
+        results = []
+        for item in raw:
+            score = item.get("score", 0.0)
+            if threshold is not None and score < threshold:
                 continue
-            if target := self._node_id_from_vertex_id(edge["inV"]):
-                result.append(
-                    {
-                        "source": source_id,
-                        "target": target,
-                        "type": edge["properties"]["relation_type"],
-                    }
-                )
+            entry: dict[str, Any] = {"id": item["id"], "score": score}
+            if return_fields:
+                node = self.get_node(item["id"], include_embedding=False)
+                if node:
+                    for f in return_fields:
+                        if f == "memory":
+                            entry["memory"] = node.get("memory")
+                        elif f in node.get("metadata", {}):
+                            entry[f] = node["metadata"][f]
+            results.append(entry)
+        return results
+
+    def search_by_fulltext(self, query_words: list[str], top_k: int = 10,
+                           scope: str | None = None, status: str | None = None,
+                           user_name: str | None = None, **kwargs) -> list[dict]:
+        tenant = self._tenant(user_name)
+        word = query_words[0] if query_words else ""
+        filters = [f".has('user_name', '{tenant}')"]
+        if scope:
+            filters.append(f".has('memory_type', '{scope}')")
+        if status:
+            filters.append(f".has('status', '{status}')")
+        filter_str = "".join(filters)
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}'){filter_str}"
+             f".has('memory', textContains('{word}'))"
+             f".limit({top_k}).valueMap(true)")
+        rows = self._gremlin_exec(q)
+        results = []
+        for row in rows:
+            props = self._parse_valuemap(row)
+            results.append({"id": props.get("id", ""), "score": 1.0})
+        return results
+
+    def get_by_metadata(self, filters: list[dict[str, Any]],
+                        user_name: str | None = None,
+                        status: str | None = None, **kwargs) -> list[str]:
+        tenant = self._tenant(user_name)
+        q = f"g.V().hasLabel('{_VERTEX_LABEL}').has('user_name', '{tenant}')"
+        if status:
+            q += f".has('status', '{status}')"
+        for f in filters:
+            field = f["field"]
+            op = f.get("op", "=")
+            value = f["value"]
+            if field in ("memory_type", "status", "user_name"):
+                if op == "=":
+                    q += f".has('{field}', '{value}')"
+            # Metadata fields are in metadata_json — filter post-fetch for complex ops
+        q += ".values('id')"
+        ids = self._gremlin_exec(q)
+        return [str(i) for i in ids]
+
+    # ------------------------------------------------------------------
+    # Memory Utilities (Neo4j-compatible extras)
+    # ------------------------------------------------------------------
+
+    def get_memory_count(self, memory_type: str, user_name: str | None = None) -> int:
+        tenant = self._tenant(user_name)
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('memory_type', '{memory_type}')"
+             f".has('user_name', '{tenant}').count()")
+        rows = self._gremlin_exec(q)
+        return int(rows[0]) if rows else 0
+
+    def node_not_exist(self, scope: str, user_name: str | None = None) -> bool:
+        return self.get_memory_count(scope, user_name) == 0
+
+    def remove_oldest_memory(self, memory_type: str, keep_latest: int,
+                              user_name: str | None = None) -> None:
+        tenant = self._tenant(user_name)
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('memory_type', '{memory_type}')"
+             f".has('user_name', '{tenant}')"
+             f".order().by('updated_at', desc)"
+             f".range({keep_latest}, -1).drop()")
+        self._gremlin_exec(q)
+
+    def get_all_memory_items(self, scope: str, include_embedding: bool = False,
+                             status: str | None = None, **kwargs) -> list[dict]:
+        tenant = kwargs.get("user_name") or self.user_name
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('memory_type', '{scope}')"
+             f".has('user_name', '{tenant}')")
+        if status:
+            q += f".has('status', '{status}')"
+        q += ".valueMap(true)"
+        rows = self._gremlin_exec(q)
+        return [_unpack_node(self._parse_valuemap(r), include_embedding) for r in rows]
+
+    def get_structure_optimization_candidates(self, scope: str, **kwargs) -> list[dict]:
+        tenant = kwargs.get("user_name") or self.user_name
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('memory_type', '{scope}')"
+             f".has('status', 'activated')"
+             f".has('user_name', '{tenant}')"
+             f".filter(bothE('{_EDGE_LABEL}').count().is(0))"
+             f".valueMap(true)")
+        rows = self._gremlin_exec(q)
+        return [_unpack_node(self._parse_valuemap(r)) for r in rows]
+
+    def get_grouped_counts(self, group_fields: list[str],
+                           user_name: str | None = None, **kwargs) -> list[dict]:
+        tenant = self._tenant(user_name)
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('user_name', '{tenant}')"
+             f".groupCount().by(values({', '.join(repr(f) for f in group_fields)}))")
+        rows = self._gremlin_exec(q)
+        if rows and isinstance(rows[0], dict):
+            return [{"key": k, "count": v} for k, v in rows[0].items()]
+        return []
+
+    def get_neighbors_by_tag(self, tags: list[str], exclude_ids: list[str],
+                              top_k: int = 5, min_overlap: int = 1,
+                              user_name: str | None = None) -> list[dict[str, Any]]:
+        tenant = self._tenant(user_name)
+        exclude_str = str(exclude_ids)
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('user_name', '{tenant}')"
+             f".has('status', 'activated')"
+             f".not(hasId(*{exclude_str}))"
+             f".valueMap(true).limit({top_k * 10})")
+        rows = self._gremlin_exec(q)
+        results = []
+        for row in rows:
+            props = self._parse_valuemap(row)
+            node = _unpack_node(props)
+            node_tags = node.get("metadata", {}).get("tags", [])
+            if isinstance(node_tags, str):
+                node_tags = [node_tags]
+            overlap = len(set(tags) & set(node_tags))
+            if overlap >= min_overlap:
+                node["overlap_count"] = overlap
+                results.append(node)
+        results.sort(key=lambda x: x.get("overlap_count", 0), reverse=True)
+        return results[:top_k]
+
+    def get_children_with_embeddings(self, id: str,
+                                      user_name: str | None = None) -> list[dict[str, Any]]:
+        tenant = self._tenant(user_name)
+        q = (f"g.V('{id}').outE('{_EDGE_LABEL}')"
+             f".has('{_RELATION_TYPE_KEY}', 'PARENT')"
+             f".has('user_name', '{tenant}')"
+             f".inV().valueMap(true)")
+        rows = self._gremlin_exec(q)
+        result = []
+        for row in rows:
+            props = self._parse_valuemap(row)
+            embedding = None
+            if props.get("embedding_json"):
+                try:
+                    embedding = json.loads(props["embedding_json"])
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            result.append({
+                "id": props.get("id", ""),
+                "memory": props.get("memory", ""),
+                "embedding": embedding,
+            })
         return result
 
-    def get_grouped_counts(self, user_name: str | None = None) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for node in self.get_all_memory_items("", user_name=user_name):
-            scope = node["metadata"].get("memory_type", "")
-            counts[scope] = counts.get(scope, 0) + 1
-        return counts
+    # ------------------------------------------------------------------
+    # Maintenance
+    # ------------------------------------------------------------------
 
-    def node_not_exist(self, id: str, user_name: str | None = None) -> bool:
-        return self.get_node(id, user_name=user_name) is None
+    def clear(self, user_name: str | None = None) -> None:
+        tenant = self._tenant(user_name)
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('user_name', '{tenant}').drop()")
+        self._gremlin_exec(q)
 
-    def search_by_fulltext(
-        self, query: str, top_k: int = 5, user_name: str | None = None
-    ) -> list[dict]:
-        return [
-            node
-            for node in self.get_all_memory_items("", user_name=user_name)
-            if query.lower() in node["memory"].lower()
-        ][:top_k]
+    def export_graph(self, include_embedding: bool = False, **kwargs) -> dict[str, Any]:
+        scope = kwargs.get("memory_type")
+        tenant = self._tenant(kwargs.get("user_name"))
+        q = f"g.V().hasLabel('{_VERTEX_LABEL}').has('user_name', '{tenant}')"
+        if scope:
+            if isinstance(scope, list):
+                types_str = str(scope)
+                q += f".has('memory_type', within(*{types_str}))"
+            else:
+                q += f".has('memory_type', '{scope}')"
+        q += ".valueMap(true)"
+        node_rows = self._gremlin_exec(q)
+        nodes = [_unpack_node(self._parse_valuemap(r), include_embedding) for r in node_rows]
+
+        eq = (f"g.V().hasLabel('{_VERTEX_LABEL}').has('user_name', '{tenant}')"
+              f".outE('{_EDGE_LABEL}').has('user_name', '{tenant}')"
+              f".project('from','to','type')"
+              f".by(outV().values('id')).by(inV().values('id')).by('{_RELATION_TYPE_KEY}')")
+        edge_rows = self._gremlin_exec(eq)
+        return {"nodes": nodes, "edges": edge_rows}
+
+    def import_graph(self, data: dict[str, Any], user_name: str | None = None) -> None:
+        nodes = data.get("nodes", [])
+        edges = data.get("edges", [])
+        if nodes:
+            self.add_nodes_batch(nodes, user_name)
+        for edge in edges:
+            self.add_edge(edge["source_id"], edge["target_id"], edge["type"], user_name)
+
+    def deduplicate_nodes(self) -> None:
+        raise NotImplementedError
+
+    def detect_conflicts(self) -> list[tuple[str, str]]:
+        raise NotImplementedError
+
+    def merge_nodes(self, id1: str, id2: str) -> str:
+        raise NotImplementedError
+
+    def delete_node_by_prams(self, user_name: str | None = None, **kwargs) -> None:
+        tenant = self._tenant(user_name)
+        q = f"g.V().hasLabel('{_VERTEX_LABEL}').has('user_name', '{tenant}')"
+        for k, v in kwargs.items():
+            q += f".has('{k}', '{v}')"
+        q += ".drop()"
+        self._gremlin_exec(q)
+
+    def get_user_names_by_memory_ids(self, memory_ids: list[str]) -> dict[str, str | None]:
+        if not memory_ids:
+            return {}
+        ids_str = str(memory_ids)
+        q = (f"g.V().hasId(*{ids_str})"
+             f".project('id', 'user_name').by('id').by('user_name')")
+        rows = self._gremlin_exec(q)
+        result: dict[str, str | None] = {mid: None for mid in memory_ids}
+        for row in rows:
+            if isinstance(row, dict):
+                result[row.get("id", "")] = row.get("user_name")
+        return result
+
+    def exist_user_name(self, user_name: str) -> dict[str, bool]:
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('user_name', '{user_name}').limit(1).count()")
+        rows = self._gremlin_exec(q)
+        return {user_name: bool(rows and rows[0])}
+
+    def delete_node_by_mem_cube_id(self, mem_cube_id: str,
+                                    user_name: str | None = None) -> None:
+        tenant = self._tenant(user_name)
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('user_name', '{tenant}')"
+             f".has('mem_cube_id', '{mem_cube_id}').drop()")
+        self._gremlin_exec(q)
+
+    def recover_memory_by_mem_cube_id(self, mem_cube_id: str,
+                                       user_name: str | None = None) -> None:
+        tenant = self._tenant(user_name)
+        q = (f"g.V().hasLabel('{_VERTEX_LABEL}')"
+             f".has('user_name', '{tenant}')"
+             f".has('mem_cube_id', '{mem_cube_id}')"
+             f".property('status', 'activated')")
+        self._gremlin_exec(q)
