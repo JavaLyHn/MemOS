@@ -72,17 +72,21 @@ class HugeGraphGraphDB(BaseGraphDB):
         self._gremlin = self._client.gremlin()
 
         # optional vector DB for embedding search
-        vec_cfg = (
-            VectorDBConfigFactory.model_validate(config.vec_config)
-            if config.vec_config
-            else None
-        )
-        if vec_cfg:
+        self._vec_db = None
+        self._vec_backend: str | None = None
+        self._vec_collection: str | None = None
+        if config.vec_config:
+            from memos.configs.vec_db import VectorDBConfigFactory
             from memos.vec_dbs.factory import VecDBFactory
-            from memos.configs.vec_db import VectorDBConfigFactory  # noqa: F811
+            vec_cfg = VectorDBConfigFactory.model_validate(config.vec_config)
             self._vec_db = VecDBFactory.from_config(vec_cfg)
-        else:
-            self._vec_db = None
+            self._vec_backend = vec_cfg.backend
+            # Milvus stores collection_name as list; grab the first entry
+            if self._vec_backend == "milvus":
+                cn = vec_cfg.config.collection_name
+                self._vec_collection = cn[0] if isinstance(cn, list) else cn
+            else:
+                self._vec_collection = vec_cfg.config.collection_name
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -90,6 +94,52 @@ class HugeGraphGraphDB(BaseGraphDB):
 
     def _tenant(self, user_name: str | None = None) -> str:
         return user_name or self.user_name
+
+    # ------------------------------------------------------------------
+    # Vector DB abstraction helpers (Qdrant vs Milvus)
+    # ------------------------------------------------------------------
+
+    def _vec_add(self, items: list) -> None:
+        """Add VecDBItems via whichever backend is configured."""
+        if self._vec_db is None:
+            return
+        if self._vec_backend == "milvus":
+            from memos.vec_dbs.item import MilvusVecDBItem
+            milvus_items = [
+                MilvusVecDBItem(id=i.id, vector=i.vector, payload=i.payload) for i in items
+            ]
+            self._vec_db.add(self._vec_collection, milvus_items)
+        else:
+            self._vec_db.add(items)
+
+    def _vec_delete(self, ids: list[str]) -> None:
+        """Delete by IDs via whichever backend is configured."""
+        if self._vec_db is None or not ids:
+            return
+        if self._vec_backend == "milvus":
+            self._vec_db.delete(self._vec_collection, ids)
+        else:
+            self._vec_db.delete(ids)
+
+    def _vec_search(self, vector: list[float], top_k: int,
+                    payload_filter: dict) -> list:
+        """Search via whichever backend is configured. Returns list of VecDBItem."""
+        if self._vec_db is None:
+            return []
+        if self._vec_backend == "milvus":
+            return self._vec_db.search(
+                query_vector=vector,
+                query="",
+                collection_name=self._vec_collection,
+                top_k=top_k,
+                filter=payload_filter,
+            )
+        else:
+            return self._vec_db.search(
+                query_vector=vector,
+                top_k=top_k,
+                filter=payload_filter,
+            )
 
     def _gremlin_exec(self, query: str, bindings: dict | None = None) -> list:
         result = self._gremlin.exec(query)
@@ -153,7 +203,7 @@ class HugeGraphGraphDB(BaseGraphDB):
 
         if embedding and self._vec_db:
             from memos.vec_dbs.item import VecDBItem
-            self._vec_db.add_item(VecDBItem(id=id, vector=embedding, payload={"user_name": tenant}))
+            self._vec_add([VecDBItem(id=id, vector=embedding, payload={"user_name": tenant})])
 
     def add_nodes_batch(self, nodes: list[dict[str, Any]],
                         user_name: str | None = None) -> None:
@@ -189,7 +239,7 @@ class HugeGraphGraphDB(BaseGraphDB):
 
         self._g.addVertices(batch)
         if vec_items and self._vec_db:
-            self._vec_db.add_items(vec_items)
+            self._vec_add(vec_items)
 
     def update_node(self, id: str, fields: dict[str, Any],
                     user_name: str | None = None) -> None:
@@ -224,7 +274,7 @@ class HugeGraphGraphDB(BaseGraphDB):
         self._g.removeVertexById(id)
         if self._vec_db:
             try:
-                self._vec_db.delete_item(id)
+                self._vec_delete([id])
             except Exception:
                 pass
 
@@ -407,15 +457,18 @@ class HugeGraphGraphDB(BaseGraphDB):
         if status:
             payload_filter["status"] = status
 
-        raw = self._vec_db.search(vector, top_k=top_k, payload_filter=payload_filter)
+        raw = self._vec_search(vector, top_k=top_k, payload_filter=payload_filter)
         results = []
         for item in raw:
-            score = item.get("score", 0.0)
+            score = item.score if hasattr(item, "score") else item.get("score", 0.0)
+            if score is None:
+                score = 0.0
             if threshold is not None and score < threshold:
                 continue
-            entry: dict[str, Any] = {"id": item["id"], "score": score}
+            item_id = item.id if hasattr(item, "id") else item["id"]
+            entry: dict[str, Any] = {"id": item_id, "score": score}
             if return_fields:
-                node = self.get_node(item["id"], include_embedding=False)
+                node = self.get_node(item_id, include_embedding=False)
                 if node:
                     for f in return_fields:
                         if f == "memory":
