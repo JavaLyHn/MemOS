@@ -241,6 +241,43 @@ class PostgresGraphDBConfig(BaseConfig):
         return self
 
 
+class HugeGraphDBConfig(BaseConfig):
+    """Configuration for a fixed-schema Apache HugeGraph memory graph."""
+
+    url: str = Field(..., description="HugeGraph REST endpoint, without graphspace path")
+    graphspace: str = Field(..., description="HugeGraph graphspace")
+    graph: str = Field(..., description="HugeGraph graph name")
+    user: str | None = Field(default=None, description="Optional HugeGraph user")
+    password: str | None = Field(default=None, description="Optional HugeGraph password")
+    user_name: str = Field(..., description="Logical MemOS tenant identifier")
+    request_timeout: float = Field(default=10.0, gt=0, description="HTTP timeout in seconds")
+    auto_create_schema: bool = Field(
+        default=False, description="Create fixed labels and indexes when absent"
+    )
+    vec_config: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional vector store used for embedding recall; graph data remains in HugeGraph",
+    )
+
+    @field_validator("vec_config", mode="before")
+    @classmethod
+    def validate_vec_config(cls, vec_config: Any) -> dict[str, Any] | None:
+        if vec_config is None:
+            return None
+        if isinstance(vec_config, VectorDBConfigFactory):
+            vec_config = vec_config.model_dump()
+        VectorDBConfigFactory.model_validate(vec_config)
+        return vec_config
+
+    @model_validator(mode="after")
+    def validate_config(self):
+        if bool(self.user) != bool(self.password):
+            raise ValueError("HugeGraph `user` and `password` must be provided together")
+        if not self.url.strip() or not self.graphspace.strip() or not self.graph.strip():
+            raise ValueError("HugeGraph `url`, `graphspace`, and `graph` must not be empty")
+        return self
+
+
 class GraphDBConfigFactory(BaseModel):
     backend: str = Field(..., description="Backend for graph database")
     config: dict[str, Any] = Field(..., description="Configuration for the graph database backend")
@@ -250,6 +287,7 @@ class GraphDBConfigFactory(BaseModel):
         "neo4j-community": Neo4jCommunityGraphDBConfig,
         "polardb": PolarDBGraphDBConfig,
         "postgres": PostgresGraphDBConfig,
+        "hugegraph": HugeGraphDBConfig,
     }
 
     @field_validator("backend")
