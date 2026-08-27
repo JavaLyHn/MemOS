@@ -24,17 +24,21 @@ schema.propertyKey("metadata_json").asText().ifNotExist().create()
 schema.propertyKey("embedding_json").asText().ifNotExist().create()
 schema.propertyKey("mem_cube_id").asText().ifNotExist().create()
 schema.propertyKey("relation_type").asText().ifNotExist().create()
+schema.propertyKey("delete_record_id").asText().ifNotExist().create()
+schema.propertyKey("delete_time").asText().ifNotExist().create()
 
 // ── Vertex Label ───────────────────────────────────────────────────────────
 schema.vertexLabel("Memory")
+    .useCustomizeStringId()
     .properties(
         "id", "memory", "user_name", "memory_type", "status",
-        "created_at", "updated_at", "metadata_json", "embedding_json", "mem_cube_id"
+        "created_at", "updated_at", "metadata_json", "embedding_json", "mem_cube_id",
+        "delete_record_id", "delete_time"
     )
-    .primaryKeys("id")
     .nullableKeys(
         "memory", "user_name", "memory_type", "status",
-        "created_at", "updated_at", "metadata_json", "embedding_json", "mem_cube_id"
+        "created_at", "updated_at", "metadata_json", "embedding_json", "mem_cube_id",
+        "delete_record_id", "delete_time"
     )
     .ifNotExist()
     .create()

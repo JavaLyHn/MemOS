@@ -2,8 +2,8 @@ import json
 import traceback
 
 from memos.embedders.factory import OllamaEmbedder
-from memos.graph_dbs.item import GraphDBNode
 from memos.graph_dbs.base import BaseGraphDB
+from memos.graph_dbs.item import GraphDBNode
 from memos.llms.base import BaseLLM
 from memos.log import get_logger
 from memos.memories.textual.item import TreeNodeTextualMemoryMetadata

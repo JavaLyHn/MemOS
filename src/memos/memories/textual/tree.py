@@ -7,14 +7,13 @@ import time
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from memos.configs.memory import TreeTextMemoryConfig
 from memos.configs.reranker import RerankerConfigFactory
 from memos.context.context import ContextThreadPoolExecutor
 from memos.dependency import require_python_package
 from memos.embedders.factory import EmbedderFactory, OllamaEmbedder
-from memos.graph_dbs.base import BaseGraphDB
 from memos.graph_dbs.factory import GraphStoreFactory
 from memos.llms.factory import AzureLLM, LLMFactory, OllamaLLM, OpenAILLM
 from memos.log import get_logger
@@ -30,6 +29,10 @@ from memos.memories.textual.tree_text_memory.retrieve.internet_retriever_factory
     InternetRetrieverFactory,
 )
 from memos.memories.textual.tree_text_memory.retrieve.retrieve_utils import StopwordManager
+
+
+if TYPE_CHECKING:
+    from memos.graph_dbs.base import BaseGraphDB
 from memos.reranker.factory import RerankerFactory
 from memos.types import MessageList
 

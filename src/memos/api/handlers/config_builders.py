@@ -36,21 +36,23 @@ def build_graph_db_config(user_id: str = "default") -> dict[str, Any]:
     Returns:
         Validated graph database configuration dictionary
     """
-    graph_db_backend_map = {
-        "neo4j-community": APIConfig.get_neo4j_community_config(user_id=user_id),
-        "neo4j": APIConfig.get_neo4j_config(user_id=user_id),
-        "polardb": APIConfig.get_polardb_config(user_id=user_id),
-        "postgres": APIConfig.get_postgres_config(user_id=user_id),
-    }
-
     # Support both GRAPH_DB_BACKEND and legacy NEO4J_BACKEND env vars
     graph_db_backend = os.getenv(
         "GRAPH_DB_BACKEND", os.getenv("NEO4J_BACKEND", "neo4j-community")
     ).lower()
+    graph_db_backend_builders = {
+        "neo4j-community": APIConfig.get_neo4j_community_config,
+        "neo4j": APIConfig.get_neo4j_config,
+        "polardb": APIConfig.get_polardb_config,
+        "postgres": APIConfig.get_postgres_config,
+        "hugegraph": APIConfig.get_hugegraph_config,
+    }
+    if graph_db_backend not in graph_db_backend_builders:
+        raise ValueError(f"Invalid graph DB backend: {graph_db_backend}")
     return GraphDBConfigFactory.model_validate(
         {
             "backend": graph_db_backend,
-            "config": graph_db_backend_map[graph_db_backend],
+            "config": graph_db_backend_builders[graph_db_backend](user_id=user_id),
         }
     )
 

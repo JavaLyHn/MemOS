@@ -8,6 +8,7 @@ import re
 import time
 
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -796,6 +797,39 @@ class APIConfig:
         }
 
     @staticmethod
+    def get_hugegraph_config(user_id: str | None = None) -> dict[str, Any]:
+        """Get HugeGraph configuration from the documented environment variables."""
+        endpoint = urlparse(os.getenv("HUGEGRAPH_URL", "http://localhost:8080"))
+        if endpoint.scheme != "http" or endpoint.hostname is None:
+            raise ValueError("HUGEGRAPH_URL only supports http:// with the current client")
+
+        normalized_user_id = user_id or "default"
+        return {
+            "ip": endpoint.hostname,
+            "port": endpoint.port or 80,
+            "graph": os.getenv("HUGEGRAPH_GRAPH", "hugegraph"),
+            "graphspace": os.getenv("HUGEGRAPH_GRAPHSPACE") or None,
+            "user": os.getenv("HUGEGRAPH_USER") or None,
+            "password": os.getenv("HUGEGRAPH_PASSWORD") or None,
+            "user_name": f"memos{normalized_user_id}",
+            "vec_config": {
+                "backend": "qdrant",
+                "config": {
+                    "collection_name": os.getenv(
+                        "QDRANT_COLLECTION_NAME", "memos_hugegraph_vectors"
+                    ),
+                    "vector_dimension": int(os.getenv("EMBEDDING_DIMENSION", "1024")),
+                    "distance_metric": "cosine",
+                    "host": os.getenv("QDRANT_HOST", "localhost"),
+                    "port": int(os.getenv("QDRANT_PORT", "6333")),
+                    "path": os.getenv("QDRANT_PATH"),
+                    "url": os.getenv("QDRANT_URL"),
+                    "api_key": os.getenv("QDRANT_API_KEY"),
+                },
+            },
+        }
+
+    @staticmethod
     def get_neo4j_config(user_id: str | None = None) -> dict[str, Any]:
         """Get Neo4j configuration."""
         if os.getenv("MOS_NEO4J_SHARED_DB", "false").lower() == "true":
@@ -1193,26 +1227,24 @@ class APIConfig:
 
         default_config = MOSConfig(**config_dict)
 
-        neo4j_community_config = APIConfig.get_neo4j_community_config(user_id)
-        neo4j_config = APIConfig.get_neo4j_config(user_id)
-        polardb_config = APIConfig.get_polardb_config(user_id)
         internet_config = (
             APIConfig.get_internet_config()
             if os.getenv("ENABLE_INTERNET", "false").lower() == "true"
             else None
         )
-        postgres_config = APIConfig.get_postgres_config(user_id=user_id)
-        graph_db_backend_map = {
-            "neo4j-community": neo4j_community_config,
-            "neo4j": neo4j_config,
-            "polardb": polardb_config,
-            "postgres": postgres_config,
-        }
         # Support both GRAPH_DB_BACKEND and legacy NEO4J_BACKEND env vars
         graph_db_backend = os.getenv(
             "GRAPH_DB_BACKEND", os.getenv("NEO4J_BACKEND", "neo4j-community")
         ).lower()
-        if graph_db_backend in graph_db_backend_map:
+        graph_db_backend_builders = {
+            "neo4j-community": APIConfig.get_neo4j_community_config,
+            "neo4j": APIConfig.get_neo4j_config,
+            "polardb": APIConfig.get_polardb_config,
+            "postgres": APIConfig.get_postgres_config,
+            "hugegraph": APIConfig.get_hugegraph_config,
+        }
+        if graph_db_backend in graph_db_backend_builders:
+            graph_db_config = graph_db_backend_builders[graph_db_backend](user_id=user_id)
             # Create MemCube config
 
             default_cube_config = GeneralMemCubeConfig.model_validate(
@@ -1226,7 +1258,7 @@ class APIConfig:
                             "dispatcher_llm": {"backend": "openai", "config": openai_config},
                             "graph_db": {
                                 "backend": graph_db_backend,
-                                "config": graph_db_backend_map[graph_db_backend],
+                                "config": graph_db_config,
                             },
                             "embedder": APIConfig.get_embedder_config(),
                             "internet_retriever": internet_config,
@@ -1276,16 +1308,6 @@ class APIConfig:
             return None
 
         openai_config = APIConfig.get_openai_config()
-        neo4j_community_config = APIConfig.get_neo4j_community_config(user_id="default")
-        neo4j_config = APIConfig.get_neo4j_config(user_id="default")
-        polardb_config = APIConfig.get_polardb_config(user_id="default")
-        postgres_config = APIConfig.get_postgres_config(user_id="default")
-        graph_db_backend_map = {
-            "neo4j-community": neo4j_community_config,
-            "neo4j": neo4j_config,
-            "polardb": polardb_config,
-            "postgres": postgres_config,
-        }
         internet_config = (
             APIConfig.get_internet_config()
             if os.getenv("ENABLE_INTERNET", "false").lower() == "true"
@@ -1295,7 +1317,15 @@ class APIConfig:
         graph_db_backend = os.getenv(
             "GRAPH_DB_BACKEND", os.getenv("NEO4J_BACKEND", "neo4j-community")
         ).lower()
-        if graph_db_backend in graph_db_backend_map:
+        graph_db_backend_builders = {
+            "neo4j-community": APIConfig.get_neo4j_community_config,
+            "neo4j": APIConfig.get_neo4j_config,
+            "polardb": APIConfig.get_polardb_config,
+            "postgres": APIConfig.get_postgres_config,
+            "hugegraph": APIConfig.get_hugegraph_config,
+        }
+        if graph_db_backend in graph_db_backend_builders:
+            graph_db_config = graph_db_backend_builders[graph_db_backend](user_id="default")
             return GeneralMemCubeConfig.model_validate(
                 {
                     "user_id": "default",
@@ -1307,7 +1337,7 @@ class APIConfig:
                             "dispatcher_llm": {"backend": "openai", "config": openai_config},
                             "graph_db": {
                                 "backend": graph_db_backend,
-                                "config": graph_db_backend_map[graph_db_backend],
+                                "config": graph_db_config,
                             },
                             "embedder": APIConfig.get_embedder_config(),
                             "reranker": APIConfig.get_reranker_config(),

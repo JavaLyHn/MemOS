@@ -79,7 +79,8 @@ tree-mem = [
 
 # HugeGraph graph backend
 hugegraph = [
-    "hugegraph-python (>=0.1.1)",  # pyhugegraph client
+    "hugegraph-python (>=1.5.0,<2.0.0)",  # pyhugegraph client
+    "qdrant-client (>=1.16.0,<2.0.0)",  # default embedding vector store
 ]
 
 # MemScheduler
@@ -134,6 +135,7 @@ all = [
     "datasketch (>=1.6.5,<2.0.0)",
     "jieba (>=0.38.1,<0.42.1)",
     "rank-bm25 (>=0.2.2)",
+    "hugegraph-python (>=1.5.0,<2.0.0)",
     # NOT exist in the above optional groups
     # Because they are either huge-size dependencies or infrequently used dependencies.
     # We kindof don't want users to install them.

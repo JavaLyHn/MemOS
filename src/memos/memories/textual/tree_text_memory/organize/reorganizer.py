@@ -12,8 +12,8 @@ import numpy as np
 from memos.context.context import ContextThread, ContextThreadPoolExecutor
 from memos.dependency import require_python_package
 from memos.embedders.factory import OllamaEmbedder
-from memos.graph_dbs.item import GraphDBEdge, GraphDBNode
 from memos.graph_dbs.base import BaseGraphDB
+from memos.graph_dbs.item import GraphDBEdge, GraphDBNode
 from memos.llms.base import BaseLLM
 from memos.log import get_logger
 from memos.memories.textual.item import SourceMessage, TreeNodeTextualMemoryMetadata
