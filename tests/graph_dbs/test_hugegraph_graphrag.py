@@ -14,7 +14,7 @@ All HugeGraph / pyhugegraph I/O is mocked — no live server required.
 
 import uuid
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from memos.graph_dbs.base import BaseGraphDB
 from memos.graph_dbs.hugegraph import HugeGraphGraphDB
@@ -45,15 +45,12 @@ def _make_hugegraph_mock() -> HugeGraphGraphDB:
     config.user_name = "test_user"
     config.vec_config = None
 
-    with patch("pyhugegraph.client.PyHugeClient"):
-        instance = HugeGraphGraphDB.__new__(HugeGraphGraphDB)
-        instance.config = config
-        instance.user_name = "test_user"
-        instance._g = MagicMock()
-        instance._gremlin = MagicMock()
-        instance._vec_db = None
-        instance._vec_backend = None
-        instance._vec_collection = None
+    instance = HugeGraphGraphDB.__new__(HugeGraphGraphDB)
+    instance.config = config
+    instance.user_name = "test_user"
+    instance._g = MagicMock()
+    instance._gremlin = MagicMock()
+    instance._vector_index = None
     return instance
 
 

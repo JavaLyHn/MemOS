@@ -812,13 +812,25 @@ class APIConfig:
             "user": os.getenv("HUGEGRAPH_USER") or None,
             "password": os.getenv("HUGEGRAPH_PASSWORD") or None,
             "user_name": f"memos{normalized_user_id}",
-            "vec_config": {
+            "vec_config": APIConfig.get_hugegraph_vector_config(),
+        }
+
+    @staticmethod
+    def get_hugegraph_vector_config() -> dict[str, Any] | None:
+        """Build the optional, backend-neutral vector configuration for HugeGraph."""
+        backend = os.getenv("HUGEGRAPH_VECTOR_BACKEND", "qdrant").strip().lower()
+        if backend in {"", "none", "disabled"}:
+            return None
+
+        vector_dimension = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
+        if backend == "qdrant":
+            return {
                 "backend": "qdrant",
                 "config": {
                     "collection_name": os.getenv(
                         "QDRANT_COLLECTION_NAME", "memos_hugegraph_vectors"
                     ),
-                    "vector_dimension": int(os.getenv("EMBEDDING_DIMENSION", "1024")),
+                    "vector_dimension": vector_dimension,
                     "distance_metric": "cosine",
                     "host": os.getenv("QDRANT_HOST", "localhost"),
                     "port": int(os.getenv("QDRANT_PORT", "6333")),
@@ -826,8 +838,24 @@ class APIConfig:
                     "url": os.getenv("QDRANT_URL"),
                     "api_key": os.getenv("QDRANT_API_KEY"),
                 },
-            },
-        }
+            }
+        if backend == "milvus":
+            return {
+                "backend": "milvus",
+                "config": {
+                    "collection_name": [
+                        os.getenv("HUGEGRAPH_MILVUS_COLLECTION_NAME", "memos_hugegraph_vectors")
+                    ],
+                    "vector_dimension": vector_dimension,
+                    "distance_metric": "cosine",
+                    "uri": os.getenv("MILVUS_URI", "http://localhost:19530"),
+                    "user_name": os.getenv("MILVUS_USER_NAME", "root"),
+                    "password": os.getenv("MILVUS_PASSWORD", "12345678"),
+                },
+            }
+        raise ValueError(
+            f"Unsupported HUGEGRAPH_VECTOR_BACKEND: {backend!r}; expected qdrant, milvus, or none"
+        )
 
     @staticmethod
     def get_neo4j_config(user_id: str | None = None) -> dict[str, Any]:

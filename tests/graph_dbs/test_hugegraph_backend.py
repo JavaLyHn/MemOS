@@ -170,6 +170,47 @@ def test_k_neighbor_uses_public_pyhugegraph_traverser_api():
     assert ".has('status', \"activated\")" in filter_query
 
 
+def test_neighbors_by_tag_scans_pages_and_excludes_non_long_term_nodes():
+    backend = _backend_with_vector_index()
+    backend._gremlin_exec = MagicMock(
+        return_value=[
+            {
+                "id": ["working"],
+                "memory": ["working memory"],
+                "user_name": ["tenant-1"],
+                "memory_type": ["WorkingMemory"],
+                "status": ["activated"],
+                "metadata_json": ['{"tags":["topic"]}'],
+            },
+            {
+                "id": ["reasoning"],
+                "memory": ["reasoning memory"],
+                "user_name": ["tenant-1"],
+                "memory_type": ["LongTermMemory"],
+                "status": ["activated"],
+                "metadata_json": ['{"tags":["topic"],"type":"reasoning"}'],
+            },
+            {
+                "id": ["candidate"],
+                "memory": ["candidate memory"],
+                "user_name": ["tenant-1"],
+                "memory_type": ["LongTermMemory"],
+                "status": ["activated"],
+                "metadata_json": ['{"tags":["topic","python"]}'],
+            },
+        ]
+    )
+
+    result = backend.get_neighbors_by_tag(
+        tags=["topic", "python"], exclude_ids=[], top_k=1, min_overlap=1
+    )
+
+    assert [node["id"] for node in result] == ["candidate"]
+    query = backend._gremlin_exec.call_args.args[0]
+    assert ".range(0, 1000)" in query
+    assert ".limit(" not in query
+
+
 def test_delete_node_does_not_mutate_unknown_tenant_node():
     backend = _backend_with_vector_index()
     backend._get_vertex_by_node_id = MagicMock(return_value=None)

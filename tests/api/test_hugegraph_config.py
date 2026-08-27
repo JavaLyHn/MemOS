@@ -56,6 +56,44 @@ def test_graph_db_builder_selects_hugegraph(monkeypatch):
     assert config.config.vec_config["backend"] == "qdrant"
 
 
+def test_hugegraph_config_selects_milvus_vector_backend(monkeypatch):
+    _set_hugegraph_env(monkeypatch)
+    monkeypatch.setenv("HUGEGRAPH_VECTOR_BACKEND", "milvus")
+    monkeypatch.setenv("MILVUS_URI", "http://milvus:19530")
+    monkeypatch.setenv("HUGEGRAPH_MILVUS_COLLECTION_NAME", "hugegraph_vectors")
+
+    config = APIConfig.get_hugegraph_config(user_id="tenant-1")
+
+    assert config["vec_config"] == {
+        "backend": "milvus",
+        "config": {
+            "collection_name": ["hugegraph_vectors"],
+            "vector_dimension": 1536,
+            "distance_metric": "cosine",
+            "uri": "http://milvus:19530",
+            "user_name": "root",
+            "password": "12345678",
+        },
+    }
+
+
+def test_hugegraph_config_can_disable_vector_backend(monkeypatch):
+    _set_hugegraph_env(monkeypatch)
+    monkeypatch.setenv("HUGEGRAPH_VECTOR_BACKEND", "none")
+
+    assert APIConfig.get_hugegraph_config(user_id="tenant-1")["vec_config"] is None
+
+
+def test_hugegraph_config_rejects_unknown_vector_backend(monkeypatch):
+    _set_hugegraph_env(monkeypatch)
+    monkeypatch.setenv("HUGEGRAPH_VECTOR_BACKEND", "unknown")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="HUGEGRAPH_VECTOR_BACKEND"):
+        APIConfig.get_hugegraph_config(user_id="tenant-1")
+
+
 def test_default_cube_config_selects_hugegraph(monkeypatch):
     _set_hugegraph_env(monkeypatch)
     monkeypatch.setenv("MOS_ENABLE_DEFAULT_CUBE_CONFIG", "true")

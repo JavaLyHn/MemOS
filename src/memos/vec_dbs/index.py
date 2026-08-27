@@ -91,7 +91,14 @@ class MilvusVectorIndex(_ConfiguredVectorIndex):
 
     def _milvus_items(self, items: list[VecDBItem]) -> list[MilvusVecDBItem]:
         return [
-            MilvusVecDBItem(id=item.id, vector=item.vector, payload=item.payload) for item in items
+            MilvusVecDBItem(
+                id=item.id,
+                memory="",
+                original_text="",
+                vector=item.vector,
+                payload=item.payload,
+            )
+            for item in items
         ]
 
     def upsert(self, items: list[VecDBItem]) -> None:

@@ -39,6 +39,10 @@ TLS 时，应在受信网络内通过反向代理终止 TLS，并让 MemOS 到 H
 
 MemOS 容器内连接 Qdrant 使用 `qdrant:6333`，Compose 已自动注入。连接宿主机上的 HugeGraph 时，macOS/Windows 可使用 `host.docker.internal`；Linux 请将 `HUGEGRAPH_URL` 改成宿主机可达 IP，或使用实际的 HugeGraph 服务地址。
 
+HugeGraph 的向量索引通过 `HUGEGRAPH_VECTOR_BACKEND` 选择，支持 `qdrant`（默认）、`milvus` 和
+`none`。选择 Milvus 时设置 `MILVUS_URI`、`MILVUS_USER_NAME`、`MILVUS_PASSWORD`，并可用
+`HUGEGRAPH_MILVUS_COLLECTION_NAME` 指定集合；选择 `none` 可只使用图存储，不初始化外部向量库。
+
 默认 embedding 配置使用外部 OpenAI-compatible 服务。Qdrant 只负责存储和相似度检索，不负责生成 embedding。
 
 要把 memmy-agent 自带 Desktop/Agent Runtime 接到该存储链路，参见

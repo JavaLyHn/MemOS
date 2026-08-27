@@ -1,5 +1,6 @@
 """HugeGraph backend for MemOS using the official hugegraph-python client."""
 
+import heapq
 import json
 import re
 
@@ -939,30 +940,60 @@ class HugeGraphGraphDB(BaseGraphDB):
         min_overlap: int = 1,
         user_name: str | None = None,
     ) -> list[dict[str, Any]]:
+        if top_k <= 0 or not tags:
+            return []
         tenant = self._tenant(user_name)
         exclude_str = self._gremlin_literal(exclude_ids)
-        limit = max(0, int(top_k)) * 10
-        q = (
+        scan_batch_size = 1000
+        base_query = (
             f"g.V().hasLabel('{_VERTEX_LABEL}')"
             f".has('user_name', {self._gremlin_literal(tenant)})"
             f".has('status', 'activated')"
             f".not(hasId(*{exclude_str}))"
-            f".valueMap(true).limit({limit})"
         )
-        rows = self._gremlin_exec(q)
-        results = []
-        for row in rows:
-            props = self._parse_valuemap(row)
-            node = _unpack_node(props)
-            node_tags = node.get("metadata", {}).get("tags", [])
-            if isinstance(node_tags, str):
-                node_tags = [node_tags]
-            overlap = len(set(tags) & set(node_tags))
-            if overlap >= min_overlap:
+        required_overlap = max(1, int(min_overlap))
+        tag_set = set(tags)
+        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        sequence = 0
+        offset = 0
+
+        # Tags live in metadata_json, so HugeGraph cannot apply the overlap
+        # predicate through the fixed schema. Scan bounded pages and keep only
+        # the best top_k candidates to preserve correctness without materializing
+        # the whole tenant graph in Python.
+        while True:
+            q = f"{base_query}.range({offset}, {offset + scan_batch_size}).valueMap(true)"
+            rows = self._gremlin_exec(q)
+            if not rows:
+                break
+            for row in rows:
+                props = self._parse_valuemap(row)
+                node = _unpack_node(props)
+                metadata = node.get("metadata", {})
+                if (
+                    metadata.get("memory_type") == "WorkingMemory"
+                    or metadata.get("type") == "reasoning"
+                ):
+                    continue
+                node_tags = metadata.get("tags", [])
+                if isinstance(node_tags, str):
+                    node_tags = [node_tags]
+                overlap = len(tag_set & set(node_tags))
+                if overlap < required_overlap:
+                    continue
                 node["overlap_count"] = overlap
-                results.append(node)
-        results.sort(key=lambda x: x.get("overlap_count", 0), reverse=True)
-        return results[:top_k]
+                candidate = (overlap, sequence, node)
+                sequence += 1
+                if len(ranked) < top_k:
+                    heapq.heappush(ranked, candidate)
+                elif (overlap, candidate[1]) > (ranked[0][0], ranked[0][1]):
+                    heapq.heapreplace(ranked, candidate)
+            offset += len(rows)
+            if len(rows) < scan_batch_size:
+                break
+
+        ranked.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+        return [item[2] for item in ranked]
 
     def get_children_with_embeddings(
         self, id: str, user_name: str | None = None

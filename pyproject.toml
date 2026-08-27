@@ -81,6 +81,7 @@ tree-mem = [
 hugegraph = [
     "hugegraph-python (>=1.5.0,<2.0.0)",  # pyhugegraph client
     "qdrant-client (>=1.16.0,<2.0.0)",  # default embedding vector store
+    "pymilvus (>=2.5.12,<3.0.0)",  # optional Milvus vector store
 ]
 
 # MemScheduler
