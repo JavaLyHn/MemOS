@@ -11,6 +11,8 @@ from memos.configs.graph_db import HugeGraphDBConfig
 from memos.dependency import require_python_package
 from memos.graph_dbs.base import BaseGraphDB
 from memos.log import get_logger
+from memos.vec_dbs.index import BaseVectorIndex, VectorIndexFactory
+from memos.vec_dbs.item import VecDBItem
 
 
 logger = get_logger(__name__)
@@ -74,7 +76,11 @@ class HugeGraphGraphDB(BaseGraphDB):
         install_command="pip install 'MemoryOS[hugegraph]'",
         install_link="https://github.com/apache/hugegraph-ai",
     )
-    def __init__(self, config: HugeGraphDBConfig):
+    def __init__(
+        self,
+        config: HugeGraphDBConfig,
+        vector_index: BaseVectorIndex | None = None,
+    ):
         from pyhugegraph.client import PyHugeClient
 
         self.config = config
@@ -91,23 +97,12 @@ class HugeGraphGraphDB(BaseGraphDB):
         self._gremlin = self._client.gremlin()
         self._traverser = self._client.traverser()
 
-        # optional vector DB for embedding search
-        self._vec_db = None
-        self._vec_backend: str | None = None
-        self._vec_collection: str | None = None
-        if config.vec_config:
-            from memos.configs.vec_db import VectorDBConfigFactory
-            from memos.vec_dbs.factory import VecDBFactory
-
-            vec_cfg = VectorDBConfigFactory.model_validate(config.vec_config)
-            self._vec_db = VecDBFactory.from_config(vec_cfg)
-            self._vec_backend = vec_cfg.backend
-            # Milvus stores collection_name as list; grab the first entry
-            if self._vec_backend == "milvus":
-                cn = vec_cfg.config.collection_name
-                self._vec_collection = cn[0] if isinstance(cn, list) else cn
-            else:
-                self._vec_collection = vec_cfg.config.collection_name
+        # The graph provider depends on a backend-neutral vector index. The
+        # factory is only a convenience for config-driven construction; callers
+        # can inject any BaseVectorIndex implementation directly.
+        self._vector_index = vector_index
+        if self._vector_index is None and config.vec_config:
+            self._vector_index = VectorIndexFactory.from_config(config.vec_config)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -116,11 +111,9 @@ class HugeGraphGraphDB(BaseGraphDB):
     def check_health(self) -> None:
         """Raise when graph or configured vector storage cannot serve requests."""
         self._gremlin_exec("g.V().limit(1).count()")
-        if self._vec_db is None:
+        if self._vector_index is None:
             return
-        collections = self._vec_db.list_collections()
-        if self._vec_collection not in collections:
-            raise ConnectionError(f"Vector collection {self._vec_collection!r} is unavailable")
+        self._vector_index.check_health()
 
     def _tenant(self, user_name: str | None = None) -> str:
         return user_name or self.user_name
@@ -136,50 +129,26 @@ class HugeGraphGraphDB(BaseGraphDB):
         }
 
     # ------------------------------------------------------------------
-    # Vector DB abstraction helpers (Qdrant vs Milvus)
+    # Vector index coordination
     # ------------------------------------------------------------------
 
     def _vec_add(self, items: list) -> None:
-        """Add VecDBItems via whichever backend is configured."""
-        if self._vec_db is None:
+        """Upsert vectors through the injected backend-neutral index."""
+        if self._vector_index is None:
             return
-        if self._vec_backend == "milvus":
-            from memos.vec_dbs.item import MilvusVecDBItem
-
-            milvus_items = [
-                MilvusVecDBItem(id=i.id, vector=i.vector, payload=i.payload) for i in items
-            ]
-            self._vec_db.add(self._vec_collection, milvus_items)
-        else:
-            self._vec_db.add(items)
+        self._vector_index.upsert(items)
 
     def _vec_delete(self, ids: list[str]) -> None:
         """Delete by IDs via whichever backend is configured."""
-        if self._vec_db is None or not ids:
+        if self._vector_index is None or not ids:
             return
-        if self._vec_backend == "milvus":
-            self._vec_db.delete(self._vec_collection, ids)
-        else:
-            self._vec_db.delete(ids)
+        self._vector_index.delete(ids)
 
     def _vec_search(self, vector: list[float], top_k: int, payload_filter: dict) -> list:
-        """Search via whichever backend is configured. Returns list of VecDBItem."""
-        if self._vec_db is None:
+        """Search through the injected backend-neutral vector index."""
+        if self._vector_index is None:
             return []
-        if self._vec_backend == "milvus":
-            return self._vec_db.search(
-                query_vector=vector,
-                query="",
-                collection_name=self._vec_collection,
-                top_k=top_k,
-                filter=payload_filter,
-            )
-        else:
-            return self._vec_db.search(
-                query_vector=vector,
-                top_k=top_k,
-                filter=payload_filter,
-            )
+        return self._vector_index.search(vector, top_k, payload_filter)
 
     @staticmethod
     def _gremlin_literal(value: Any) -> str:
@@ -208,9 +177,8 @@ class HugeGraphGraphDB(BaseGraphDB):
         return len(ids)
 
     def _sync_vector_status(self, rows: list[dict[str, Any]], tenant: str, status: str) -> None:
-        if not self._vec_db:
+        if self._vector_index is None:
             return
-        from memos.vec_dbs.item import VecDBItem
 
         items = []
         for row in rows:
@@ -302,9 +270,7 @@ class HugeGraphGraphDB(BaseGraphDB):
             # refreshes the already-created graph vertex idempotently.
             self._g.appendVertex(id, props)
 
-        if embedding and self._vec_db:
-            from memos.vec_dbs.item import VecDBItem
-
+        if embedding and self._vector_index:
             self._vec_add(
                 [VecDBItem(id=id, vector=embedding, payload=self._vector_payload(meta, tenant))]
             )
@@ -338,9 +304,7 @@ class HugeGraphGraphDB(BaseGraphDB):
                 else "",
             }
             batch.append((nid, props))
-            if embedding and self._vec_db:
-                from memos.vec_dbs.item import VecDBItem
-
+            if embedding and self._vector_index:
                 vec_items.append(
                     VecDBItem(id=nid, vector=embedding, payload=self._vector_payload(meta, tenant))
                 )
@@ -359,7 +323,7 @@ class HugeGraphGraphDB(BaseGraphDB):
                 self._g.appendVertex(node_id, props)
             else:
                 self._g.addVertex(_VERTEX_LABEL, props, id=node_id)
-        if vec_items and self._vec_db:
+        if vec_items and self._vector_index:
             self._vec_add(vec_items)
 
     def update_node(self, id: str, fields: dict[str, Any], user_name: str | None = None) -> None:
@@ -407,9 +371,7 @@ class HugeGraphGraphDB(BaseGraphDB):
             except (TypeError, json.JSONDecodeError):
                 vector = None
 
-        if vector and self._vec_db:
-            from memos.vec_dbs.item import VecDBItem
-
+        if vector and self._vector_index:
             vector_meta = {
                 "memory_type": props.get("memory_type", existing.get("memory_type", "")),
                 "status": props.get("status", existing.get("status", "")),
@@ -422,7 +384,7 @@ class HugeGraphGraphDB(BaseGraphDB):
     def delete_node(self, id: str, user_name: str | None = None) -> None:
         if self._get_vertex_by_node_id(id, user_name) is None:
             return
-        if self._vec_db:
+        if self._vector_index:
             self._vec_delete([id])
         self._g.removeVertexById(id)
 
@@ -732,7 +694,7 @@ class HugeGraphGraphDB(BaseGraphDB):
         return_fields: list[str] | None = None,
         **kwargs,
     ) -> list[dict]:
-        if self._vec_db is None:
+        if self._vector_index is None:
             logger.warning("[search_by_embedding] no vec_db configured, returning empty")
             return []
         tenant = self._tenant(user_name)

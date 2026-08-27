@@ -4,19 +4,18 @@ from unittest.mock import MagicMock
 import pytest
 
 from memos.graph_dbs.hugegraph import HugeGraphGraphDB
+from memos.vec_dbs.index import BaseVectorIndex
 
 
 MEMORY_ID = "11111111-1111-4111-8111-111111111111"
 
 
-def _backend_with_qdrant() -> HugeGraphGraphDB:
+def _backend_with_vector_index() -> HugeGraphGraphDB:
     backend = HugeGraphGraphDB.__new__(HugeGraphGraphDB)
     backend.user_name = "tenant-1"
     backend._g = MagicMock()
     backend._traverser = MagicMock()
-    backend._vec_db = MagicMock()
-    backend._vec_backend = "qdrant"
-    backend._vec_collection = "memories"
+    backend._vector_index = MagicMock(spec=BaseVectorIndex)
     backend._gremlin = MagicMock()
     backend._gremlin.exec.return_value = []
     backend.config = SimpleNamespace(graph="hugegraph")
@@ -24,7 +23,7 @@ def _backend_with_qdrant() -> HugeGraphGraphDB:
 
 
 def test_gremlin_uses_public_pyhugegraph_manager():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.side_effect = [[3], [4]]
 
     assert backend._gremlin_exec("g.V().count()") == [3]
@@ -35,27 +34,28 @@ def test_gremlin_uses_public_pyhugegraph_manager():
 
 
 def test_health_checks_graph_and_vector_collection():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin_exec = MagicMock(return_value=[0])
-    backend._vec_db.list_collections.return_value = ["memories"]
 
     backend.check_health()
 
     backend._gremlin_exec.assert_called_once_with("g.V().limit(1).count()")
-    backend._vec_db.list_collections.assert_called_once_with()
+    backend._vector_index.check_health.assert_called_once_with()
 
 
 def test_health_rejects_missing_vector_collection():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin_exec = MagicMock(return_value=[0])
-    backend._vec_db.list_collections.return_value = []
+    backend._vector_index.check_health.side_effect = ConnectionError(
+        "Vector collection unavailable"
+    )
 
     with pytest.raises(ConnectionError, match="Vector collection"):
         backend.check_health()
 
 
 def test_fulltext_search_uses_hugegraph_text_predicate():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin_exec = MagicMock(return_value=[])
 
     backend.search_by_fulltext(["needle"], user_name="tenant-1")
@@ -66,7 +66,7 @@ def test_fulltext_search_uses_hugegraph_text_predicate():
 
 
 def test_add_node_writes_every_vector_filter_field():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
 
     backend.add_node(
         MEMORY_ID,
@@ -79,7 +79,7 @@ def test_add_node_writes_every_vector_filter_field():
         },
     )
 
-    vector_item = backend._vec_db.add.call_args.args[0][0]
+    vector_item = backend._vector_index.upsert.call_args.args[0][0]
     assert str(vector_item.id) == MEMORY_ID
     assert vector_item.payload == {
         "user_name": "tenant-1",
@@ -90,7 +90,7 @@ def test_add_node_writes_every_vector_filter_field():
 
 
 def test_add_nodes_batch_writes_every_vector_filter_field():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
 
     backend.add_nodes_batch(
         [
@@ -107,7 +107,7 @@ def test_add_nodes_batch_writes_every_vector_filter_field():
         ]
     )
 
-    vector_item = backend._vec_db.add.call_args.args[0][0]
+    vector_item = backend._vector_index.upsert.call_args.args[0][0]
     assert vector_item.payload == {
         "user_name": "tenant-1",
         "memory_type": "WorkingMemory",
@@ -122,7 +122,7 @@ def test_add_nodes_batch_writes_every_vector_filter_field():
 
 
 def test_add_edge_uses_fixed_schema_label_and_relation_property():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._get_vertex_by_node_id = MagicMock(return_value={"id": MEMORY_ID})
 
     backend.add_edge(MEMORY_ID, "22222222-2222-4222-8222-222222222222", "PARENT")
@@ -136,7 +136,7 @@ def test_add_edge_uses_fixed_schema_label_and_relation_property():
 
 
 def test_add_edge_rejects_endpoint_outside_tenant():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._get_vertex_by_node_id = MagicMock(side_effect=[{"id": MEMORY_ID}, None])
 
     backend.add_edge(MEMORY_ID, "22222222-2222-4222-8222-222222222222", "PARENT")
@@ -145,7 +145,7 @@ def test_add_edge_rejects_endpoint_outside_tenant():
 
 
 def test_k_neighbor_uses_public_pyhugegraph_traverser_api():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._traverser.k_neighbor.return_value = {
         "size": 1,
         "kneighbor": ["neighbor-1"],
@@ -171,17 +171,17 @@ def test_k_neighbor_uses_public_pyhugegraph_traverser_api():
 
 
 def test_delete_node_does_not_mutate_unknown_tenant_node():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._get_vertex_by_node_id = MagicMock(return_value=None)
 
     backend.delete_node(MEMORY_ID)
 
     backend._g.removeVertexById.assert_not_called()
-    backend._vec_db.delete.assert_not_called()
+    backend._vector_index.delete.assert_not_called()
 
 
 def test_get_nodes_filters_vertices_by_tenant():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._g.getVerticesById.return_value = [
         SimpleNamespace(properties={"id": MEMORY_ID, "memory": "mine", "user_name": "tenant-1"}),
         SimpleNamespace(
@@ -199,7 +199,7 @@ def test_get_nodes_filters_vertices_by_tenant():
 
 
 def test_single_node_lookup_falls_back_to_vertex_rest_lookup_for_hugegraph_uuid():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     properties = {
         "id": MEMORY_ID,
         "memory": "stored memory",
@@ -222,7 +222,7 @@ def test_single_node_lookup_falls_back_to_vertex_rest_lookup_for_hugegraph_uuid(
 
 
 def test_grouped_counts_names_single_group_field_like_neo4j():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin_exec = MagicMock(return_value=[{"LongTermMemory": 3, "WorkingMemory": 1}])
 
     assert backend.get_grouped_counts(["memory_type"]) == [
@@ -232,7 +232,7 @@ def test_grouped_counts_names_single_group_field_like_neo4j():
 
 
 def test_grouped_counts_supports_multiple_fields():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin_exec = MagicMock(
         return_value=[
             {"memory_type": ["LongTermMemory"], "status": ["activated"]},
@@ -248,7 +248,7 @@ def test_grouped_counts_supports_multiple_fields():
 
 
 def test_update_embedding_upserts_vector_with_updated_filters():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._get_vertex_by_node_id = MagicMock(
         return_value={
             "id": MEMORY_ID,
@@ -261,7 +261,7 @@ def test_update_embedding_upserts_vector_with_updated_filters():
 
     backend.update_node(MEMORY_ID, {"embedding": [0.3, 0.4], "status": "archived"})
 
-    vector_item = backend._vec_db.add.call_args.args[0][0]
+    vector_item = backend._vector_index.upsert.call_args.args[0][0]
     assert vector_item.payload == {
         "user_name": "tenant-1",
         "memory_type": "LongTermMemory",
@@ -271,7 +271,7 @@ def test_update_embedding_upserts_vector_with_updated_filters():
 
 
 def test_exported_edges_can_be_imported_without_translation():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin_exec = MagicMock(
         side_effect=[
             [],
@@ -299,7 +299,7 @@ def test_exported_edges_can_be_imported_without_translation():
 
 
 def test_import_graph_accepts_legacy_from_to_edge_shape():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend.add_edge = MagicMock()
 
     backend.import_graph(
@@ -323,7 +323,7 @@ def test_import_graph_accepts_legacy_from_to_edge_shape():
 
 
 def test_get_node_encodes_untrusted_id_as_one_gremlin_literal():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.return_value = []
     hostile_id = "memory').drop(); g.V('"
 
@@ -337,7 +337,7 @@ def test_get_node_encodes_untrusted_id_as_one_gremlin_literal():
 
 
 def test_update_filter_fields_refreshes_vector_payload_without_new_embedding():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._get_vertex_by_node_id = MagicMock(
         return_value={
             "id": MEMORY_ID,
@@ -351,15 +351,15 @@ def test_update_filter_fields_refreshes_vector_payload_without_new_embedding():
 
     backend.update_node(MEMORY_ID, {"status": "archived"})
 
-    vector_item = backend._vec_db.add.call_args.args[0][0]
+    vector_item = backend._vector_index.upsert.call_args.args[0][0]
     assert vector_item.vector == [0.1, 0.2]
     assert vector_item.payload["status"] == "archived"
 
 
 def test_delete_node_surfaces_vector_failure_before_graph_delete():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._get_vertex_by_node_id = MagicMock(return_value={"id": MEMORY_ID})
-    backend._vec_db.delete.side_effect = RuntimeError("vector unavailable")
+    backend._vector_index.delete.side_effect = RuntimeError("vector unavailable")
 
     with pytest.raises(RuntimeError, match="vector unavailable"):
         backend.delete_node(MEMORY_ID)
@@ -368,42 +368,42 @@ def test_delete_node_surfaces_vector_failure_before_graph_delete():
 
 
 def test_clear_deletes_tenant_vectors_before_graph_vertices():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.side_effect = [[MEMORY_ID], []]
 
     backend.clear()
 
-    backend._vec_db.delete.assert_called_once_with([MEMORY_ID])
+    backend._vector_index.delete.assert_called_once_with([MEMORY_ID])
     queries = [call.args[0] for call in backend._gremlin.exec.call_args_list]
     assert queries[0].endswith(".values('id')")
     assert queries[1].endswith(".drop()")
 
 
 def test_remove_oldest_memory_deletes_matching_vectors():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.side_effect = [[MEMORY_ID], []]
 
     backend.remove_oldest_memory("WorkingMemory", keep_latest=10)
 
-    backend._vec_db.delete.assert_called_once_with([MEMORY_ID])
+    backend._vector_index.delete.assert_called_once_with([MEMORY_ID])
     queries = [call.args[0] for call in backend._gremlin.exec.call_args_list]
     assert ".range(10, -1).values('id')" in queries[0]
     assert ".range(10, -1).drop()" in queries[1]
 
 
 def test_delete_by_mem_cube_id_deletes_matching_vectors():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.side_effect = [[MEMORY_ID], []]
 
     backend.delete_node_by_mem_cube_id(
         mem_cube_id="tenant-1", delete_record_id="record-1", hard_delete=True
     )
 
-    backend._vec_db.delete.assert_called_once_with([MEMORY_ID])
+    backend._vector_index.delete.assert_called_once_with([MEMORY_ID])
 
 
 def test_recover_by_mem_cube_id_refreshes_vector_status():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.side_effect = [
         [
             {
@@ -420,13 +420,13 @@ def test_recover_by_mem_cube_id_refreshes_vector_status():
 
     backend.recover_memory_by_mem_cube_id("tenant-1", "record-1")
 
-    vector_item = backend._vec_db.add.call_args.args[0][0]
+    vector_item = backend._vector_index.upsert.call_args.args[0][0]
     assert vector_item.vector == [0.1, 0.2]
     assert vector_item.payload["status"] == "activated"
 
 
 def test_get_by_metadata_filters_json_metadata_with_and_semantics():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     second_id = "22222222-2222-4222-8222-222222222222"
     backend._gremlin.exec.return_value = [
         {
@@ -454,15 +454,15 @@ def test_get_by_metadata_filters_json_metadata_with_and_semantics():
 
 
 def test_get_by_metadata_rejects_unknown_operator():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
 
     with pytest.raises(ValueError, match="Unsupported metadata operator"):
         backend.get_by_metadata([{"field": "key", "op": "exec", "value": "x"}])
 
 
 def test_embedding_search_hydrates_fields_with_requested_tenant():
-    backend = _backend_with_qdrant()
-    backend._vec_db.search.return_value = [SimpleNamespace(id=MEMORY_ID, score=0.9)]
+    backend = _backend_with_vector_index()
+    backend._vector_index.search.return_value = [SimpleNamespace(id=MEMORY_ID, score=0.9)]
     backend.get_nodes = MagicMock(
         return_value=[{"id": MEMORY_ID, "memory": "mine", "metadata": {}}]
     )
@@ -475,7 +475,7 @@ def test_embedding_search_hydrates_fields_with_requested_tenant():
 
 
 def test_get_nodes_honors_include_embedding():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._g.getVerticesById.return_value = [
         SimpleNamespace(
             properties={
@@ -493,7 +493,7 @@ def test_get_nodes_honors_include_embedding():
 
 
 def test_soft_delete_and_recover_support_server_router_signature():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.side_effect = [
         [
             {
@@ -527,12 +527,12 @@ def test_soft_delete_and_recover_support_server_router_signature():
 
     assert deleted == 1
     assert recovered == 1
-    vector_items = [call.args[0][0] for call in backend._vec_db.add.call_args_list]
+    vector_items = [call.args[0][0] for call in backend._vector_index.upsert.call_args_list]
     assert [item.payload["status"] for item in vector_items] == ["deleted", "activated"]
 
 
 def test_delete_node_by_prams_supports_memory_ids_contract():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.side_effect = [
         [{"id": MEMORY_ID, "user_name": ["tenant-1"], "metadata_json": ["{}"]}],
         [],
@@ -541,11 +541,11 @@ def test_delete_node_by_prams_supports_memory_ids_contract():
     count = backend.delete_node_by_prams(memory_ids=[MEMORY_ID])
 
     assert count == 1
-    backend._vec_db.delete.assert_called_once_with([MEMORY_ID])
+    backend._vector_index.delete.assert_called_once_with([MEMORY_ID])
 
 
 def test_add_node_retry_repairs_vector_after_graph_partial_write():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._get_vertex_by_node_id = MagicMock(return_value={"id": MEMORY_ID})
 
     backend.add_node(
@@ -556,11 +556,11 @@ def test_add_node_retry_repairs_vector_after_graph_partial_write():
 
     backend._g.addVertex.assert_not_called()
     backend._g.appendVertex.assert_called_once()
-    backend._vec_db.add.assert_called_once()
+    backend._vector_index.upsert.assert_called_once()
 
 
 def test_delete_node_by_prams_supports_cube_file_and_nested_filter_contract():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.side_effect = [
         [
             {
@@ -584,7 +584,7 @@ def test_delete_node_by_prams_supports_cube_file_and_nested_filter_contract():
 
 
 def test_path_traversal_scopes_vertices_and_edges_to_tenant():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     target_id = "22222222-2222-4222-8222-222222222222"
 
     backend.get_path(MEMORY_ID, target_id, user_name="tenant-1")
@@ -594,17 +594,17 @@ def test_path_traversal_scopes_vertices_and_edges_to_tenant():
 
 
 def test_delete_node_by_prams_postfilters_rows_outside_tenant():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.return_value = [
         {"id": MEMORY_ID, "user_name": ["tenant-2"], "metadata_json": ["{}"]}
     ]
 
     assert backend.delete_node_by_prams(memory_ids=[MEMORY_ID]) == 0
-    backend._vec_db.delete.assert_not_called()
+    backend._vector_index.delete.assert_not_called()
 
 
 def test_delete_node_by_prams_rejects_unknown_filter_operator():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     backend._gremlin.exec.return_value = [
         {
             "id": MEMORY_ID,
@@ -616,11 +616,11 @@ def test_delete_node_by_prams_rejects_unknown_filter_operator():
     with pytest.raises(ValueError, match="Unsupported delete filter operator"):
         backend.delete_node_by_prams(filter={"key": {"exec": "drop"}})
 
-    backend._vec_db.delete.assert_not_called()
+    backend._vector_index.delete.assert_not_called()
 
 
 def test_recovery_vector_failure_is_retryable_before_graph_activation():
-    backend = _backend_with_qdrant()
+    backend = _backend_with_vector_index()
     row = {
         "id": MEMORY_ID,
         "status": ["deleted"],
@@ -629,13 +629,13 @@ def test_recovery_vector_failure_is_retryable_before_graph_activation():
         "embedding_json": ["[0.1, 0.2]"],
     }
     backend._gremlin.exec.return_value = [row]
-    backend._vec_db.add.side_effect = RuntimeError("vector unavailable")
+    backend._vector_index.upsert.side_effect = RuntimeError("vector unavailable")
 
     with pytest.raises(RuntimeError, match="vector unavailable"):
         backend.recover_memory_by_mem_cube_id("tenant-1", "record-1")
 
     assert backend._gremlin.exec.call_count == 1
-    backend._vec_db.add.side_effect = None
+    backend._vector_index.upsert.side_effect = None
     backend._gremlin.exec.reset_mock()
     backend._gremlin.exec.side_effect = [[row], []]
 
