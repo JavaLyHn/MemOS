@@ -2,12 +2,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from memos.vec_dbs import BaseVectorIndex as ExportedBaseVectorIndex
 from memos.vec_dbs.base import BaseVecDB
 from memos.vec_dbs.index import BaseVectorIndex, MilvusVectorIndex, QdrantVectorIndex
 from memos.vec_dbs.item import MilvusVecDBItem, VecDBItem
 
 
 VECTOR_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def test_base_vector_index_is_exported_from_vec_dbs_package():
+    assert ExportedBaseVectorIndex is BaseVectorIndex
 
 
 def test_qdrant_adapter_implements_backend_neutral_vector_index():
