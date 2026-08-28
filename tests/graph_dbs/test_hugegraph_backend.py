@@ -144,12 +144,8 @@ def test_add_edge_rejects_endpoint_outside_tenant():
     backend._g.addEdge.assert_not_called()
 
 
-def test_k_neighbor_uses_public_pyhugegraph_traverser_api():
+def test_k_neighbor_applies_server_side_result_bound():
     backend = _backend_with_vector_index()
-    backend._traverser.k_neighbor.return_value = {
-        "size": 1,
-        "kneighbor": ["neighbor-1"],
-    }
     backend._gremlin.exec.return_value = ["neighbor-1"]
 
     result = backend.search_by_kneighbor(
@@ -158,16 +154,17 @@ def test_k_neighbor_uses_public_pyhugegraph_traverser_api():
         limit=7,
         user_name="tenant-1",
         status="activated",
+        max_degree=2,
     )
 
     assert result["neighbors"] == ["neighbor-1"]
     assert result["paths"] == []
     assert result["edges"] == []
-    backend._traverser.k_neighbor.assert_called_once_with(MEMORY_ID, 2)
-    filter_query = backend._gremlin.exec.call_args.args[0]
-    assert '.hasId(within(*["neighbor-1"]))' in filter_query
-    assert ".has('user_name', \"tenant-1\")" in filter_query
-    assert ".has('status', \"activated\")" in filter_query
+    backend._traverser.k_neighbor.assert_not_called()
+    query = backend._gremlin.exec.call_args.args[0]
+    assert ".range(0, 2)" in query
+    assert ".has('user_name', \"tenant-1\")" in query
+    assert ".has('status', \"activated\")" in query
 
 
 def test_neighbors_by_tag_scans_pages_and_excludes_non_long_term_nodes():
@@ -315,7 +312,20 @@ def test_exported_edges_can_be_imported_without_translation():
     backend = _backend_with_vector_index()
     backend._gremlin_exec = MagicMock(
         side_effect=[
-            [],
+            [
+                {
+                    "id": [MEMORY_ID],
+                    "memory": ["source"],
+                    "user_name": ["tenant-1"],
+                    "status": ["activated"],
+                },
+                {
+                    "id": ["22222222-2222-4222-8222-222222222222"],
+                    "memory": ["target"],
+                    "user_name": ["tenant-1"],
+                    "status": ["activated"],
+                },
+            ],
             [
                 {
                     "source": MEMORY_ID,
@@ -337,6 +347,61 @@ def test_exported_edges_can_be_imported_without_translation():
         "PARENT",
         None,
     )
+
+
+def test_export_graph_pushes_pagination_and_filters_to_hugegraph():
+    backend = _backend_with_vector_index()
+    backend._gremlin_exec = MagicMock(return_value=[])
+
+    backend.export_graph(
+        page=2,
+        page_size=1,
+        memory_type=["LongTermMemory"],
+        status=["activated"],
+        user_name="tenant-1",
+    )
+
+    queries = [call.args[0] for call in backend._gremlin_exec.call_args_list]
+    node_query = next(query for query in queries if ".valueMap(true)" in query)
+    assert ".range(1, 2)" in node_query
+    assert 'within(*["LongTermMemory"])' in node_query
+    assert ".has('status', within(*[\"activated\"]))" in node_query
+
+
+def test_export_graph_applies_metadata_filter_before_page_slice():
+    backend = _backend_with_vector_index()
+    backend._gremlin_exec = MagicMock(
+        side_effect=[
+            [
+                {
+                    "id": [MEMORY_ID],
+                    "memory": ["keep"],
+                    "user_name": ["tenant-1"],
+                    "status": ["activated"],
+                    "metadata_json": ['{"category":"keep"}'],
+                },
+                {
+                    "id": ["22222222-2222-4222-8222-222222222222"],
+                    "memory": ["drop"],
+                    "user_name": ["tenant-1"],
+                    "status": ["activated"],
+                    "metadata_json": ['{"category":"drop"}'],
+                },
+            ],
+            [],
+            [],
+        ]
+    )
+
+    exported = backend.export_graph(
+        page=1,
+        page_size=1,
+        filter={"category": "keep"},
+        user_name="tenant-1",
+    )
+
+    assert [node["id"] for node in exported["nodes"]] == [MEMORY_ID]
+    assert ".range(0, 1000)" in backend._gremlin_exec.call_args_list[0].args[0]
 
 
 def test_import_graph_accepts_legacy_from_to_edge_shape():

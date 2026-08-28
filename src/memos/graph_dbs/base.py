@@ -106,8 +106,8 @@ class BaseGraphDB(ABC):
 
     @abstractmethod
     def get_nodes(
-        self, ids: list, include_embedding: bool = False, **kwargs
-    ) -> dict[str, Any] | None:
+        self, ids: list[str], include_embedding: bool = False, **kwargs: Any
+    ) -> list[dict[str, Any]]:
         """
         Retrieve the metadata and memory of a list of nodes.
         Args:
@@ -256,7 +256,19 @@ class BaseGraphDB(ABC):
         """
 
     @abstractmethod
-    def export_graph(self, include_embedding: bool = False) -> dict[str, Any]:
+    def export_graph(
+        self,
+        include_embedding: bool = False,
+        *,
+        page: int | None = None,
+        page_size: int | None = None,
+        memory_type: list[str] | str | None = None,
+        status: list[str] | str | None = None,
+        filter: dict[str, Any] | None = None,
+        user_name: str | None = None,
+        user_id: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         """
         Export the entire graph as a serializable dictionary.
 

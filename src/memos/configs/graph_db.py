@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -12,6 +13,14 @@ class BaseGraphDBConfig(BaseConfig):
     uri: str | list
     user: str
     password: str
+
+
+class HugeGraphVectorBackend(str, Enum):
+    """Vector index choices exposed by the HugeGraph integration."""
+
+    QDRANT = "qdrant"
+    MILVUS = "milvus"
+    NONE = "none"
 
 
 class Neo4jGraphDBConfig(BaseGraphDBConfig):
@@ -282,7 +291,7 @@ class HugeGraphDBConfig(BaseConfig):
         return vec_config
 
     @model_validator(mode="after")
-    def validate_config(self):
+    def validate_config(self) -> "HugeGraphDBConfig":
         if bool(self.user) != bool(self.password):
             raise ValueError("HugeGraph `user` and `password` must be provided together")
         if not self.ip.strip() or not self.graph.strip():

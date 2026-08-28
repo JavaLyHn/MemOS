@@ -14,6 +14,7 @@ import requests
 
 from dotenv import load_dotenv
 
+from memos.configs.graph_db import HugeGraphVectorBackend
 from memos.context.context import ContextThread
 
 
@@ -818,14 +819,18 @@ class APIConfig:
     @staticmethod
     def get_hugegraph_vector_config() -> dict[str, Any] | None:
         """Build the optional, backend-neutral vector configuration for HugeGraph."""
-        backend = os.getenv("HUGEGRAPH_VECTOR_BACKEND", "qdrant").strip().lower()
-        if backend in {"", "none", "disabled"}:
+        backend = (
+            os.getenv("HUGEGRAPH_VECTOR_BACKEND", HugeGraphVectorBackend.QDRANT.value)
+            .strip()
+            .lower()
+        )
+        if backend in {"", HugeGraphVectorBackend.NONE.value, "disabled"}:
             return None
 
         vector_dimension = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
-        if backend == "qdrant":
+        if backend == HugeGraphVectorBackend.QDRANT.value:
             return {
-                "backend": "qdrant",
+                "backend": HugeGraphVectorBackend.QDRANT.value,
                 "config": {
                     "collection_name": os.getenv(
                         "QDRANT_COLLECTION_NAME", "memos_hugegraph_vectors"
@@ -839,9 +844,9 @@ class APIConfig:
                     "api_key": os.getenv("QDRANT_API_KEY"),
                 },
             }
-        if backend == "milvus":
+        if backend == HugeGraphVectorBackend.MILVUS.value:
             return {
-                "backend": "milvus",
+                "backend": HugeGraphVectorBackend.MILVUS.value,
                 "config": {
                     "collection_name": [
                         os.getenv("HUGEGRAPH_MILVUS_COLLECTION_NAME", "memos_hugegraph_vectors")
@@ -850,7 +855,7 @@ class APIConfig:
                     "distance_metric": "cosine",
                     "uri": os.getenv("MILVUS_URI", "http://localhost:19530"),
                     "user_name": os.getenv("MILVUS_USER_NAME", "root"),
-                    "password": os.getenv("MILVUS_PASSWORD", "12345678"),
+                    "password": os.getenv("MILVUS_PASSWORD", ""),
                 },
             }
         raise ValueError(

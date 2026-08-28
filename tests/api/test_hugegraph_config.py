@@ -72,7 +72,7 @@ def test_hugegraph_config_selects_milvus_vector_backend(monkeypatch):
             "distance_metric": "cosine",
             "uri": "http://milvus:19530",
             "user_name": "root",
-            "password": "12345678",
+            "password": "",
         },
     }
 

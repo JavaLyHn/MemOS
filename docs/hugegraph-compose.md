@@ -7,6 +7,18 @@
 
 HugeGraph 不包含在 Compose 中，需要提前准备好 HugeGraph Server、GraphSpace 和 graph，并通过根目录 `.env` 中的 `HUGEGRAPH_*` 变量连接。
 
+## Python 依赖
+
+HugeGraph provider 使用可选依赖组安装：
+
+```bash
+pip install "MemoryOS[hugegraph]"
+```
+
+该命令会直接安装 `hugegraph-python`（代码中的 import 名是 `pyhugegraph`）。`MemoryOS` 基础安装
+不会隐式安装 HugeGraph SDK；这样不使用 HugeGraph 的部署不会被额外依赖和安装失败影响。代码中的
+`require_python_package` 只负责在用户遗漏该依赖组时给出明确提示，不会在运行时修改环境或执行 pip。
+
 ## 启动
 
 ```bash
