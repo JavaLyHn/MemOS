@@ -13,6 +13,49 @@
 
 当前目标是形成事实测试口径和可复用数据，不包含 provider 修复、Neo4j 行为调整、CI gate、baseline/hash 或远端 MR 操作。
 
+### 1.1 NOW：当前真实状态（As-Is）
+
+| 领域 | 当前状态 | 证据或结论 |
+| --- | --- | --- |
+| 接口接入 | HugeGraph provider 已注册并继承 `BaseGraphDB` | 结构层可以被 MemOS 注入 |
+| 本地 mock 行为 | CRUD、边、过滤、向量适配和 GraphRAG wiring 有测试 | 相关测试当前为 `60 passed, 1 warning` |
+| 真实 HugeGraph | REST graph/schema 可读；`graphspace=DEFAULT` 健康检查成功 | 只能证明部分运行链路可用 |
+| SDK/Gremlin | 返回包装、默认 graphspace 等问题尚未闭合 | B1、B2 会影响真实读取、计数和健康检查 |
+| 上层调用 | `center_status`、过滤参数、多关键词全文检索存在不兼容风险 | B3、B4、B5 尚未通过真实 parity |
+| 隔离与迁移 | HG 使用 `user_name` 逻辑租户隔离；Neo4j 使用 multi-database；关系模型不同 | B6、B8 需要显式转换和安全边界验证 |
+| 向量检索 | 已抽象为 `BaseVectorIndex`，可外挂 Qdrant/Milvus | 向量服务不是 HugeGraph 原生能力，仍需验证同步和过滤 |
+
+因此，NOW 不是“已经平替 Neo4j”，而是“完成 provider 结构接入，并有一组 mock 证据；真实服务兼容性仍未闭环”。
+
+### 1.2 DESTINATION：必须达到的目标状态（To-Be）
+
+DESTINATION 指 MemOS 实际使用到的 `BaseGraphDB` 能力范围内，HugeGraph 可以作为 Neo4j 的可验证替代后端；不要求 HugeGraph 实现 Neo4j 的全部产品能力。
+
+| 领域 | 必须达到的状态 | 如何判定 |
+| --- | --- | --- |
+| 结构 | 工厂、配置、上层调用都能初始化 HugeGraph | S-001～S-006 通过 |
+| CRUD/关系 | 相同节点、边、更新和删除输入得到等价结果 | C-001～C-009 规范化结果一致 |
+| 租户/生命周期 | 不能跨租户读取、删除、建边或召回；状态过滤一致 | T-001～T-006 通过或差异被明确记录 |
+| 图遍历 | 方向、深度、路径、context chain 与 Neo4j 结果一致 | G-001～G-006 通过 |
+| 检索 | metadata、全文和向量检索的结果集合、排序和错误语义明确一致 | R-001～R-010 通过 |
+| 外置向量 | Qdrant 与 Milvus 通过同一 `BaseVectorIndex` 契约接入，替换其中一个不改变图数据契约 | R-007～R-009 通过 |
+| 迁移 | Neo4j 数据经过字段/关系转换后可导入 HG，并可抽样回读 | M-001～M-006 通过 |
+| 运行 | Schema、graphspace、SDK 响应包装和错误均可诊断 | 至少一次真实 HG + Schema + 向量服务验证通过 |
+
+### 1.3 如何判断 NOW 已到达 DESTINATION
+
+其他开发者必须使用同一份 fixture，在 Neo4j 和 HugeGraph 上执行同一组操作，再按第 5 节规则规范化结果。不能只看 provider 能否 import，也不能只看 mock 测试是否通过。
+
+判定顺序如下：
+
+1. 先执行结构和 mock 测试，确认接入没有破坏 MemOS 工厂及上层 wiring。
+2. 用 `tests/fixtures/hugegraph_neo4j_compatibility.json` 装载 9 个节点、5 条有效边和 2 个租户；所有正例的 `expected_ids`、`expected_order`、`expected_path` 是确定性预期。
+3. 对 Neo4j 和 HugeGraph 分别执行 C/T/G/R/M 用例，输出统一节点、边、向量结果，并比较集合、顺序、分数误差、错误类型和是否发生越权副作用。
+4. 单独执行真实服务检查：Schema、graphspace、Gremlin 响应解包、向量集合、维度错误和清理流程。
+5. 只有结构、行为、迁移和运行四类证据都满足第 7 节条件，才能把结果标记为“达到 DESTINATION”；否则必须保留为 NOW，并列出失败用例和阻断编号。
+
+本节是人工验收口径，不新增 CI gate、hash 或冻结 contract。
+
 ## 2. 当前状态结论
 
 ### 2.1 已具备的能力
@@ -75,7 +118,28 @@ fixture 的顶层 `tenant` 是测试上下文，写入节点时应作为 `user_n
 | 隔离边界 | 跨租户读取、删除、建边和向量检索 |
 | 不存在数据 | 缺失节点、缺失边、空查询、空 fixture 集合 |
 
-### 3.2 数据使用规则
+### 3.2 可直接核对的确定性预期
+
+fixture 不是只有输入数据，也包含每个查询的预期结果。其他开发者可以先不连接数据库，检查以下固定事实；连接数据库后再用同样的字段核对 provider 输出：
+
+| fixture 路径或用例 | 预期结果 |
+| --- | --- |
+| `nodes` | 9 个节点，`tenant-a` 6 个、`tenant-b` 3 个 |
+| `edges` | 5 条有效边；每条边的两个端点和边的 `tenant` 相同 |
+| `metadata_queries.exact_key` | 只返回节点 `...0001` |
+| `metadata_queries.key_in` | 返回 `...0001`、`...0002` |
+| `metadata_queries.tag_overlap` | 只返回 `...0002` |
+| `metadata_queries.importance_range` | 返回 `...0001`、`...0002` |
+| `fulltext_queries.multiple_words` | 返回 `...0002`；同时必须记录实现采用 AND、OR 还是独立排序 |
+| `vector_queries.tenant_a_long_term_activated` | 顺序为 `...0001`、`...0002`、`...0003` |
+| `vector_queries.tenant_b_isolation` | 只允许 `...0011`，不能出现 tenant-a 的 `...0001`、`...0002` |
+| `graph_queries.bounded_path` | 路径为 `...0001 → ...0002 → ...0006` |
+| `negative_cases.cross_tenant_edge` | 拒绝建边，且写操作前后数据不变 |
+| `negative_cases.tenant_b_reads_tenant_a` | 未找到，且不返回 tenant-a metadata |
+
+ID 表中的 `...0001` 等表示 fixture 中完整 UUID 的末三位，实际比较必须使用完整 ID。完整字段、过滤表达式和所有负例均以 JSON fixture 为准。
+
+### 3.3 数据使用规则
 
 - 不允许把 fixture 中的节点直接写入共享开发 graph，除非测试显式使用隔离 tenant 并保证清理。
 - live 测试必须使用独立 graph 或随机化 tenant/ID；fixture 本身不包含秘密和真实用户数据。
@@ -170,6 +234,17 @@ Neo4j 和 HugeGraph 的原始响应不作为直接比较对象。测试比较前
 7. 对空结果、未找到、参数错误和服务错误分别比较，不将所有异常统一成空列表。
 
 ## 6. 推荐运行方式
+
+### 6.0 先验证 fixture 本身
+
+在连接任何数据库前，先确认测试数据没有损坏：
+
+```bash
+python3 -m json.tool tests/fixtures/hugegraph_neo4j_compatibility.json >/dev/null
+python3 -c 'import json; from pathlib import Path; d=json.loads(Path("tests/fixtures/hugegraph_neo4j_compatibility.json").read_text()); ids={n["id"] for n in d["nodes"]}; assert len(ids) == 9; assert len(d["edges"]) == 5; assert {n["tenant"] for n in d["nodes"]} == {"tenant-a", "tenant-b"}; assert all(e["source"] in ids and e["target"] in ids for e in d["edges"]); assert all(next(n["tenant"] for n in d["nodes"] if n["id"] == e["source"]) == e["tenant"] == next(n["tenant"] for n in d["nodes"] if n["id"] == e["target"]) for e in d["edges"]); print("fixture OK: 9 nodes, 5 edges, 2 tenants")'
+```
+
+预期输出：`fixture OK: 9 nodes, 5 edges, 2 tenants`。这一步只验证数据文件，不代表 HugeGraph 或 Neo4j 已经通过。
 
 ### 6.1 当前离线测试
 
