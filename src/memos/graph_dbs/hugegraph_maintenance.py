@@ -3,6 +3,7 @@
 from typing import Any
 
 from memos.graph_dbs.hugegraph_codec import MemoryNode, matches_filter, parse_valuemap, unpack_node
+from memos.graph_dbs.hugegraph_query import format_gremlin_query
 from memos.graph_dbs.hugegraph_schema import (
     EDGE_LABEL,
     EXPORT_BATCH_SIZE,
@@ -21,7 +22,12 @@ class HugeGraphMaintenanceMixin:
     def clear(self, user_name: str | None = None) -> None:
         """Delete all nodes and vectors belonging to one tenant."""
         tenant = self._tenant(user_name)
-        traversal = f"g.V().hasLabel('{VERTEX_LABEL}').has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
+        traversal = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            """
+        )
         self._delete_matching_vertices(traversal)
 
     def _export_base_query(
@@ -31,16 +37,27 @@ class HugeGraphMaintenanceMixin:
         status: list[str] | str | None,
     ) -> str:
         """Build the server-side portion of the export node query."""
-        query = f"g.V().hasLabel('{VERTEX_LABEL}').has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
+        filters: list[str] = []
         if memory_type:
             values = memory_type if isinstance(memory_type, list) else [memory_type]
-            query += f".has('{MEMORY_TYPE_PROPERTY}', within(*{self._gremlin_literal(values)}))"
+            filters.append(
+                f".has('{MEMORY_TYPE_PROPERTY}', within(*{self._gremlin_literal(values)}))"
+            )
         if status:
             values = status if isinstance(status, list) else [status]
-            query += f".has('{STATUS_PROPERTY}', within(*{self._gremlin_literal(values)}))"
+            filters.append(f".has('{STATUS_PROPERTY}', within(*{self._gremlin_literal(values)}))")
         else:
-            query += f".has('{STATUS_PROPERTY}', neq({self._gremlin_literal(HugeGraphMemoryStatus.DELETED.value)}))"
-        return query
+            filters.append(
+                f".has('{STATUS_PROPERTY}', neq({self._gremlin_literal(HugeGraphMemoryStatus.DELETED.value)}))"
+            )
+        filter_steps = "\n".join(filters)
+        return format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            {filter_steps}
+            """
+        )
 
     def _export_nodes(
         self,
@@ -59,9 +76,12 @@ class HugeGraphMaintenanceMixin:
             page_start = ((page or 1) - 1) * (page_size or EXPORT_BATCH_SIZE)
             page_end = page_start + page_size if page_size is not None else None
             while True:
-                query = (
-                    f"{base_query}.range({scan_offset}, {scan_offset + EXPORT_BATCH_SIZE})"
-                    ".valueMap(true)"
+                query = format_gremlin_query(
+                    f"""
+                    {base_query}
+                    .range({scan_offset}, {scan_offset + EXPORT_BATCH_SIZE})
+                    .valueMap(true)
+                    """
                 )
                 rows = self._gremlin_exec(query)
                 if not rows:
@@ -83,12 +103,19 @@ class HugeGraphMaintenanceMixin:
                 selected = selected[:page_size]
             return selected
 
-        query = f"{base_query}.valueMap(true)"
+        page_clause = ""
         if page is not None or page_size is not None:
             normalized_page = max(1, int(page or 1))
             normalized_size = max(1, int(page_size or EXPORT_BATCH_SIZE))
             start = (normalized_page - 1) * normalized_size
-            query = f"{base_query}.range({start}, {start + normalized_size}).valueMap(true)"
+            page_clause = f".range({start}, {start + normalized_size})"
+        query = format_gremlin_query(
+            f"""
+            {base_query}
+            {page_clause}
+            .valueMap(true)
+            """
+        )
         rows = self._gremlin_exec(query)
         nodes = [unpack_node(parse_valuemap(row), include_embedding) for row in rows]
         return nodes
@@ -123,27 +150,28 @@ class HugeGraphMaintenanceMixin:
         if not node_ids:
             edge_rows: list[dict[str, Any]] = []
         else:
-            edge_query = (
-                f"{base_query}.outE('{EDGE_LABEL}')"
-                f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
-            )
-            if node_ids:
-                ids_literal = self._gremlin_literal(node_ids)
-                edge_query = (
-                    f"g.V().hasId(within(*{ids_literal}))"
-                    f".hasLabel('{VERTEX_LABEL}').has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
-                    f".outE('{EDGE_LABEL}').has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
-                    f".where(inV().hasId(within(*{ids_literal})))"
-                )
-            edge_query += (
-                ".project('source','target','type')"
-                f".by(outV().values('id')).by(inV().values('id')).by('{RELATION_TYPE_KEY}')"
-            )
+            ids_literal = self._gremlin_literal(node_ids)
+            edge_page = ""
             if page is not None and page_size is not None:
                 normalized_page = page
                 normalized_size = page_size
                 start = (normalized_page - 1) * normalized_size
-                edge_query += f".range({start}, {start + normalized_size})"
+                edge_page = f".range({start}, {start + normalized_size})"
+            edge_query = format_gremlin_query(
+                f"""
+                g.V().hasId(within(*{ids_literal}))
+                .hasLabel('{VERTEX_LABEL}')
+                .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+                .outE('{EDGE_LABEL}')
+                .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+                .where(inV().hasId(within(*{ids_literal})))
+                {edge_page}
+                .project('source', 'target', 'type')
+                .by(outV().values('id'))
+                .by(inV().values('id'))
+                .by('{RELATION_TYPE_KEY}')
+                """
+            )
             edge_rows = [row for row in self._gremlin_exec(edge_query) if isinstance(row, dict)]
         return {
             "nodes": nodes,
@@ -188,13 +216,18 @@ class HugeGraphMaintenanceMixin:
             return 0
         self._validate_delete_filter(filter)
         allowed_tenants = writable_cube_ids or [self._tenant(user_name)]
-        query = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f".has('{USER_NAME_PROPERTY}', within(*{self._gremlin_literal(allowed_tenants)}))"
-        )
+        id_filter = ""
         if memory_ids:
-            query += f".hasId(within(*{self._gremlin_literal(memory_ids)}))"
-        rows = self._gremlin_exec(query + ".valueMap(true)")
+            id_filter = f".hasId(within(*{self._gremlin_literal(memory_ids)}))"
+        query = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', within(*{self._gremlin_literal(allowed_tenants)}))
+            {id_filter}
+            .valueMap(true)
+            """
+        )
+        rows = self._gremlin_exec(query)
         selected_ids: list[str] = []
         for row in rows:
             node = unpack_node(parse_valuemap(row))
@@ -209,7 +242,14 @@ class HugeGraphMaintenanceMixin:
         if not selected_ids:
             return 0
         self._vec_delete(selected_ids)
-        self._gremlin_exec(f"g.V().hasId(within(*{self._gremlin_literal(selected_ids)})).drop()")
+        self._gremlin_exec(
+            format_gremlin_query(
+                f"""
+                g.V().hasId(within(*{self._gremlin_literal(selected_ids)}))
+                .drop()
+                """
+            )
+        )
         return len(selected_ids)
 
     @staticmethod
@@ -251,9 +291,13 @@ class HugeGraphMaintenanceMixin:
         """Return the tenant for each requested memory ID."""
         if not memory_ids:
             return {}
-        query = (
-            f"g.V().hasId(*{self._gremlin_literal(memory_ids)})"
-            ".project('id', 'user_name').by('id').by('user_name')"
+        query = format_gremlin_query(
+            f"""
+            g.V().hasId(*{self._gremlin_literal(memory_ids)})
+            .project('id', 'user_name')
+            .by('id')
+            .by('user_name')
+            """
         )
         result: dict[str, str | None] = dict.fromkeys(memory_ids)
         for row in self._gremlin_exec(query):
@@ -263,9 +307,13 @@ class HugeGraphMaintenanceMixin:
 
     def exist_user_name(self, user_name: str) -> dict[str, bool]:
         """Return whether a tenant has at least one memory node."""
-        query = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(user_name)}).limit(1).count()"
+        query = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(user_name)})
+            .limit(1)
+            .count()
+            """
         )
         rows = self._gremlin_exec(query)
         return {user_name: bool(rows and rows[0])}
@@ -279,26 +327,40 @@ class HugeGraphMaintenanceMixin:
         """Soft-delete or hard-delete a memory cube and synchronize vectors."""
         if not mem_cube_id or not delete_record_id:
             return 0
-        traversal = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(mem_cube_id)})"
+        delete_filter = ""
+        if hard_delete:
+            delete_filter = f".has('delete_record_id', {self._gremlin_literal(delete_record_id)})"
+        traversal = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(mem_cube_id)})
+            {delete_filter}
+            """
         )
         if hard_delete:
-            traversal += f".has('delete_record_id', {self._gremlin_literal(delete_record_id)})"
             return self._delete_matching_vertices(traversal)
         rows = self._gremlin_exec(
-            traversal
-            + f".has('{STATUS_PROPERTY}', neq('{HugeGraphMemoryStatus.DELETED.value}')).valueMap(true)"
+            format_gremlin_query(
+                f"""
+                {traversal}
+                .has('{STATUS_PROPERTY}', neq('{HugeGraphMemoryStatus.DELETED.value}'))
+                .valueMap(true)
+                """
+            )
         )
         self._sync_vector_status(rows, mem_cube_id, HugeGraphMemoryStatus.DELETED.value)
         ids = [str(parse_valuemap(row).get("id", "")) for row in rows]
         if ids:
             now = self._now_iso()
             self._gremlin_exec(
-                f"g.V().hasId(within(*{self._gremlin_literal(ids)}))"
-                f".property('status', '{HugeGraphMemoryStatus.DELETED.value}')"
-                f".property('delete_record_id', {self._gremlin_literal(delete_record_id)})"
-                f".property('delete_time', {self._gremlin_literal(now)})"
+                format_gremlin_query(
+                    f"""
+                    g.V().hasId(within(*{self._gremlin_literal(ids)}))
+                    .property('status', '{HugeGraphMemoryStatus.DELETED.value}')
+                    .property('delete_record_id', {self._gremlin_literal(delete_record_id)})
+                    .property('delete_time', {self._gremlin_literal(now)})
+                    """
+                )
             )
         return len(ids)
 
@@ -310,20 +372,34 @@ class HugeGraphMaintenanceMixin:
         """Recover soft-deleted nodes and refresh their vector status."""
         if not mem_cube_id or not delete_record_id:
             return 0
-        traversal = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(mem_cube_id)})"
-            f".has('{STATUS_PROPERTY}', '{HugeGraphMemoryStatus.DELETED.value}')"
-            f".has('delete_record_id', {self._gremlin_literal(delete_record_id)})"
+        traversal = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(mem_cube_id)})
+            .has('{STATUS_PROPERTY}', '{HugeGraphMemoryStatus.DELETED.value}')
+            .has('delete_record_id', {self._gremlin_literal(delete_record_id)})
+            """
         )
-        rows = self._gremlin_exec(traversal + ".valueMap(true)")
+        rows = self._gremlin_exec(
+            format_gremlin_query(
+                f"""
+                {traversal}
+                .valueMap(true)
+                """
+            )
+        )
         ids = [str(parse_valuemap(row).get("id", "")) for row in rows]
         if not ids:
             return 0
         self._sync_vector_status(rows, mem_cube_id, HugeGraphMemoryStatus.ACTIVATED.value)
         self._gremlin_exec(
-            f"g.V().hasId(within(*{self._gremlin_literal(ids)}))"
-            f".property('status', '{HugeGraphMemoryStatus.ACTIVATED.value}')"
-            ".property('delete_record_id', '').property('delete_time', '')"
+            format_gremlin_query(
+                f"""
+                g.V().hasId(within(*{self._gremlin_literal(ids)}))
+                .property('status', '{HugeGraphMemoryStatus.ACTIVATED.value}')
+                .property('delete_record_id', '')
+                .property('delete_time', '')
+                """
+            )
         )
         return len(ids)

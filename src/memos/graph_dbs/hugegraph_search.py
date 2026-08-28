@@ -7,6 +7,7 @@ from contextlib import suppress
 from typing import Any
 
 from memos.graph_dbs.hugegraph_codec import MemoryNode, matches_filter, parse_valuemap, unpack_node
+from memos.graph_dbs.hugegraph_query import format_gremlin_query
 from memos.graph_dbs.hugegraph_schema import (
     EDGE_LABEL,
     EMBEDDING_JSON_PROPERTY,
@@ -101,11 +102,15 @@ class HugeGraphSearchMixin:
             filters.append(f".has('{MEMORY_TYPE_PROPERTY}', {self._gremlin_literal(scope)})")
         if status:
             filters.append(f".has('{STATUS_PROPERTY}', {self._gremlin_literal(status)})")
-        query = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f"{''.join(filters)}"
-            f".has('{MEMORY_PROPERTY}', Text.contains({self._gremlin_literal(word)}))"
-            f".limit({max(0, int(top_k))}).valueMap(true)"
+        filter_steps = "\n".join(filters)
+        query = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            {filter_steps}
+            .has('{MEMORY_PROPERTY}', Text.contains({self._gremlin_literal(word)}))
+            .limit({max(0, int(top_k))})
+            .valueMap(true)
+            """
         )
         return [
             {"id": parse_valuemap(row).get("id", ""), "score": 1.0}
@@ -121,9 +126,9 @@ class HugeGraphSearchMixin:
     ) -> list[str]:
         """Return IDs matching metadata filters within one tenant."""
         tenant = self._tenant(user_name)
-        query = f"g.V().hasLabel('{VERTEX_LABEL}').has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
+        metadata_filters: list[str] = []
         if status:
-            query += f".has('{STATUS_PROPERTY}', {self._gremlin_literal(status)})"
+            metadata_filters.append(f".has('{STATUS_PROPERTY}', {self._gremlin_literal(status)})")
         supported_operators = {
             "=",
             "in",
@@ -145,11 +150,21 @@ class HugeGraphSearchMixin:
                 field in {MEMORY_TYPE_PROPERTY, STATUS_PROPERTY, USER_NAME_PROPERTY}
                 and operator == "="
             ):
-                query += f".has('{field}', {self._gremlin_literal(condition['value'])})"
+                metadata_filters.append(
+                    f".has('{field}', {self._gremlin_literal(condition['value'])})"
+                )
             filter_expression["and"].append(
                 {field: condition["value"] if operator == "=" else {operator: condition["value"]}}
             )
-        query += ".valueMap(true)"
+        metadata_steps = "\n".join(metadata_filters)
+        query = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            {metadata_steps}
+            .valueMap(true)
+            """
+        )
         result: list[str] = []
         for row in self._gremlin_exec(query):
             node = unpack_node(parse_valuemap(row))
@@ -161,10 +176,13 @@ class HugeGraphSearchMixin:
     def get_memory_count(self, memory_type: str, user_name: str | None = None) -> int:
         """Count tenant-scoped nodes for one memory type."""
         tenant = self._tenant(user_name)
-        query = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f".has('{MEMORY_TYPE_PROPERTY}', {self._gremlin_literal(memory_type)})"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)}).count()"
+        query = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{MEMORY_TYPE_PROPERTY}', {self._gremlin_literal(memory_type)})
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .count()
+            """
         )
         rows = self._gremlin_exec(query)
         return int(rows[0]) if rows else 0
@@ -181,11 +199,15 @@ class HugeGraphSearchMixin:
     ) -> None:
         """Delete older nodes while preserving the latest records."""
         tenant = self._tenant(user_name)
-        traversal = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f".has('{MEMORY_TYPE_PROPERTY}', {self._gremlin_literal(memory_type)})"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
-            f".order().by('updated_at', desc).range({max(0, int(keep_latest))}, -1)"
+        traversal = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{MEMORY_TYPE_PROPERTY}', {self._gremlin_literal(memory_type)})
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .order()
+            .by('updated_at', desc)
+            .range({max(0, int(keep_latest))}, -1)
+            """
         )
         self._delete_matching_vertices(traversal)
 
@@ -198,14 +220,19 @@ class HugeGraphSearchMixin:
     ) -> list[MemoryNode]:
         """Return all memory nodes for a scope and tenant."""
         tenant = self._tenant(kwargs.get("user_name"))
-        query = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f".has('{MEMORY_TYPE_PROPERTY}', {self._gremlin_literal(scope)})"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
+        status_filter = (
+            f".has('{STATUS_PROPERTY}', {self._gremlin_literal(status)})" if status else ""
         )
-        if status:
-            query += f".has('{STATUS_PROPERTY}', {self._gremlin_literal(status)})"
-        rows = self._gremlin_exec(query + ".valueMap(true)")
+        query = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{MEMORY_TYPE_PROPERTY}', {self._gremlin_literal(scope)})
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            {status_filter}
+            .valueMap(true)
+            """
+        )
+        rows = self._gremlin_exec(query)
         return [unpack_node(parse_valuemap(row), include_embedding) for row in rows]
 
     def get_structure_optimization_candidates(
@@ -215,12 +242,15 @@ class HugeGraphSearchMixin:
     ) -> list[MemoryNode]:
         """Return activated, isolated nodes eligible for structure optimization."""
         tenant = self._tenant(kwargs.get("user_name"))
-        query = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f".has('{MEMORY_TYPE_PROPERTY}', {self._gremlin_literal(scope)})"
-            f".has('{STATUS_PROPERTY}', {self._gremlin_literal(HugeGraphMemoryStatus.ACTIVATED.value)})"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
-            f".filter(bothE('{EDGE_LABEL}').count().is(0)).valueMap(true)"
+        query = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{MEMORY_TYPE_PROPERTY}', {self._gremlin_literal(scope)})
+            .has('{STATUS_PROPERTY}', {self._gremlin_literal(HugeGraphMemoryStatus.ACTIVATED.value)})
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .filter(bothE('{EDGE_LABEL}').count().is(0))
+            .valueMap(true)
+            """
         )
         return [unpack_node(parse_valuemap(row)) for row in self._gremlin_exec(query)]
 
@@ -235,16 +265,32 @@ class HugeGraphSearchMixin:
             raise ValueError("group_fields cannot be empty")
         tenant = self._tenant(user_name)
         fields = [self._property_name(field) for field in group_fields]
-        traversal = f"g.V().hasLabel('{VERTEX_LABEL}').has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
+        traversal = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            """
+        )
         if len(fields) == 1:
             rows = self._gremlin_exec(
-                traversal + f".groupCount().by(values({self._gremlin_literal(fields[0])}))"
+                format_gremlin_query(
+                    f"""
+                    {traversal}
+                    .groupCount()
+                    .by(values({self._gremlin_literal(fields[0])}))
+                    """
+                )
             )
             if rows and isinstance(rows[0], dict):
                 return [{fields[0]: value, "count": int(count)} for value, count in rows[0].items()]
             return []
         rows = self._gremlin_exec(
-            traversal + f".valueMap({', '.join(self._gremlin_literal(field) for field in fields)})"
+            format_gremlin_query(
+                f"""
+                {traversal}
+                .valueMap({", ".join(self._gremlin_literal(field) for field in fields)})
+                """
+            )
         )
         grouped: dict[tuple[Any, ...], int] = {}
         for row in rows:
@@ -268,11 +314,13 @@ class HugeGraphSearchMixin:
         if top_k <= 0 or not tags:
             return []
         tenant = self._tenant(user_name)
-        base_query = (
-            f"g.V().hasLabel('{VERTEX_LABEL}')"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
-            f".has('{STATUS_PROPERTY}', {self._gremlin_literal(HugeGraphMemoryStatus.ACTIVATED.value)})"
-            f".not(hasId(*{self._gremlin_literal(exclude_ids)}))"
+        base_query = format_gremlin_query(
+            f"""
+            g.V().hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .has('{STATUS_PROPERTY}', {self._gremlin_literal(HugeGraphMemoryStatus.ACTIVATED.value)})
+            .not(hasId(*{self._gremlin_literal(exclude_ids)}))
+            """
         )
         tag_set = set(tags)
         required_overlap = max(1, int(min_overlap))
@@ -280,7 +328,13 @@ class HugeGraphSearchMixin:
         sequence = 0
         offset = 0
         while True:
-            query = f"{base_query}.range({offset}, {offset + EXPORT_BATCH_SIZE}).valueMap(true)"
+            query = format_gremlin_query(
+                f"""
+                {base_query}
+                .range({offset}, {offset + EXPORT_BATCH_SIZE})
+                .valueMap(true)
+                """
+            )
             rows = self._gremlin_exec(query)
             if not rows:
                 break
@@ -317,11 +371,16 @@ class HugeGraphSearchMixin:
     ) -> list[dict[str, Any]]:
         """Return child nodes and their stored embeddings."""
         tenant = self._tenant(user_name)
-        query = (
-            f"g.V({self._gremlin_literal(id)}).outE('{EDGE_LABEL}')"
-            f".has('{RELATION_TYPE_KEY}', {self._gremlin_literal(HugeGraphRelation.PARENT.value)})"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
-            f".inV().has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)}).valueMap(true)"
+        query = format_gremlin_query(
+            f"""
+            g.V({self._gremlin_literal(id)})
+            .outE('{EDGE_LABEL}')
+            .has('{RELATION_TYPE_KEY}', {self._gremlin_literal(HugeGraphRelation.PARENT.value)})
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .inV()
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .valueMap(true)
+            """
         )
         result: list[dict[str, Any]] = []
         for row in self._gremlin_exec(query):

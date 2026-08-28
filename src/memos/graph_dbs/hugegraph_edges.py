@@ -3,6 +3,7 @@
 from typing import Any, Literal, TypeAlias
 
 from memos.graph_dbs.hugegraph_codec import MemoryNode, parse_valuemap, unpack_node
+from memos.graph_dbs.hugegraph_query import format_gremlin_query
 from memos.graph_dbs.hugegraph_schema import (
     EDGE_LABEL,
     RELATION_TYPE_KEY,
@@ -58,11 +59,15 @@ class HugeGraphEdgeMixin:
         target = self._gremlin_literal(target_id)
         relation = self._gremlin_literal(type)
         tenant_literal = self._gremlin_literal(tenant)
-        query = (
-            f"g.V({source}).outE('{EDGE_LABEL}')"
-            f".has('{RELATION_TYPE_KEY}', {relation})"
-            f".where(inV().hasId({target}))"
-            f".has('{USER_NAME_PROPERTY}', {tenant_literal}).drop()"
+        query = format_gremlin_query(
+            f"""
+            g.V({source})
+            .outE('{EDGE_LABEL}')
+            .has('{RELATION_TYPE_KEY}', {relation})
+            .where(inV().hasId({target}))
+            .has('{USER_NAME_PROPERTY}', {tenant_literal})
+            .drop()
+            """
         )
         self._gremlin_exec(query)
 
@@ -89,10 +94,16 @@ class HugeGraphEdgeMixin:
         else:
             step = "bothE"
             endpoint = f"where(otherV().hasId({target}))"
-        query = (
-            f"g.V({source}).{step}('{EDGE_LABEL}')"
-            f".has('{RELATION_TYPE_KEY}', {relation})"
-            f".has('{USER_NAME_PROPERTY}', {tenant_literal}).{endpoint}.limit(1).count()"
+        query = format_gremlin_query(
+            f"""
+            g.V({source})
+            .{step}('{EDGE_LABEL}')
+            .has('{RELATION_TYPE_KEY}', {relation})
+            .has('{USER_NAME_PROPERTY}', {tenant_literal})
+            .{endpoint}
+            .limit(1)
+            .count()
+            """
         )
         result = self._gremlin_exec(query)
         return bool(result and result[0])
@@ -118,10 +129,17 @@ class HugeGraphEdgeMixin:
             step = "inE"
         else:
             step = "bothE"
-        query = (
-            f"g.V({node_literal}).{step}('{EDGE_LABEL}')"
-            f"{type_filter}{user_filter}.project('from','to','type')"
-            f".by(outV().id()).by(inV().id()).by('{RELATION_TYPE_KEY}')"
+        query = format_gremlin_query(
+            f"""
+            g.V({node_literal})
+            .{step}('{EDGE_LABEL}')
+            {type_filter}
+            {user_filter}
+            .project('from', 'to', 'type')
+            .by(outV().id())
+            .by(inV().id())
+            .by('{RELATION_TYPE_KEY}')
+            """
         )
         rows = self._gremlin_exec(query)
         return [
@@ -156,17 +174,30 @@ class HugeGraphEdgeMixin:
 
         tenant = self._tenant(user_name)
         tenant_literal = self._gremlin_literal(tenant)
-        query = (
-            f"g.V({self._gremlin_literal(source_id)}).hasLabel('{VERTEX_LABEL}')"
-            f".has('{USER_NAME_PROPERTY}', {tenant_literal})"
-            f".repeat(bothE('{EDGE_LABEL}').has('{USER_NAME_PROPERTY}', {tenant_literal})"
-            f".otherV().hasLabel('{VERTEX_LABEL}')"
-            f".has('{USER_NAME_PROPERTY}', {tenant_literal}).simplePath())"
-            f".emit().times({depth}).dedup()"
+        status_filter = (
+            f".has('{STATUS_PROPERTY}', {self._gremlin_literal(status)})" if status else ""
         )
-        if status:
-            query += f".has('{STATUS_PROPERTY}', {self._gremlin_literal(status)})"
-        query += f".range({skipped_degree}, {skipped_degree + degree}).values('id')"
+        query = format_gremlin_query(
+            f"""
+            g.V({self._gremlin_literal(source_id)})
+            .hasLabel('{VERTEX_LABEL}')
+            .has('{USER_NAME_PROPERTY}', {tenant_literal})
+            .repeat(
+                bothE('{EDGE_LABEL}')
+                .has('{USER_NAME_PROPERTY}', {tenant_literal})
+                .otherV()
+                .hasLabel('{VERTEX_LABEL}')
+                .has('{USER_NAME_PROPERTY}', {tenant_literal})
+                .simplePath()
+            )
+            .emit()
+            .times({depth})
+            .dedup()
+            {status_filter}
+            .range({skipped_degree}, {skipped_degree + degree})
+            .values('id')
+            """
+        )
         raw_neighbors = self._gremlin_exec(query)
         neighbors = [str(item) for item in raw_neighbors if str(item) != str(source_id)]
         return {
@@ -187,11 +218,16 @@ class HugeGraphEdgeMixin:
         """Return connected node IDs in the requested direction."""
         tenant = self._tenant(user_name)
         step = {"out": "out", "in": "in", "both": "both"}[direction]
-        query = (
-            f"g.V({self._gremlin_literal(id)}).{step}E('{EDGE_LABEL}')"
-            f".has('{RELATION_TYPE_KEY}', {self._gremlin_literal(type)})"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
-            f".otherV().has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)}).values('id')"
+        query = format_gremlin_query(
+            f"""
+            g.V({self._gremlin_literal(id)})
+            .{step}E('{EDGE_LABEL}')
+            .has('{RELATION_TYPE_KEY}', {self._gremlin_literal(type)})
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .otherV()
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .values('id')
+            """
         )
         return [str(node_id) for node_id in self._gremlin_exec(query)]
 
@@ -207,12 +243,23 @@ class HugeGraphEdgeMixin:
         depth = max(0, int(max_depth))
         target = self._gremlin_literal(target_id)
         tenant_literal = self._gremlin_literal(tenant)
-        query = (
-            f"g.V({self._gremlin_literal(source_id)}).has('{USER_NAME_PROPERTY}', {tenant_literal})"
-            f".repeat(bothE('{EDGE_LABEL}').has('{USER_NAME_PROPERTY}', {tenant_literal})"
-            f".otherV().has('{USER_NAME_PROPERTY}', {tenant_literal}).simplePath())"
-            f".until(hasId({target}).or().loops().is(gte({depth})))"
-            f".hasId({target}).limit(1).path().by('id')"
+        query = format_gremlin_query(
+            f"""
+            g.V({self._gremlin_literal(source_id)})
+            .has('{USER_NAME_PROPERTY}', {tenant_literal})
+            .repeat(
+                bothE('{EDGE_LABEL}')
+                .has('{USER_NAME_PROPERTY}', {tenant_literal})
+                .otherV()
+                .has('{USER_NAME_PROPERTY}', {tenant_literal})
+                .simplePath()
+            )
+            .until(hasId({target}).or().loops().is(gte({depth})))
+            .hasId({target})
+            .limit(1)
+            .path()
+            .by('id')
+            """
         )
         rows = self._gremlin_exec(query)
         if rows and isinstance(rows[0], dict):
@@ -230,11 +277,23 @@ class HugeGraphEdgeMixin:
         tenant = self._tenant(user_name)
         traversal_depth = max(0, int(depth))
         tenant_literal = self._gremlin_literal(tenant)
-        query = (
-            f"g.V({self._gremlin_literal(center_id)}).has('{USER_NAME_PROPERTY}', {tenant_literal})"
-            f".repeat(bothE('{EDGE_LABEL}').has('{USER_NAME_PROPERTY}', {tenant_literal})"
-            f".otherV().has('{USER_NAME_PROPERTY}', {tenant_literal}).simplePath())"
-            f".emit().times({traversal_depth}).path().by(valueMap(true)).by(valueMap(true))"
+        query = format_gremlin_query(
+            f"""
+            g.V({self._gremlin_literal(center_id)})
+            .has('{USER_NAME_PROPERTY}', {tenant_literal})
+            .repeat(
+                bothE('{EDGE_LABEL}')
+                .has('{USER_NAME_PROPERTY}', {tenant_literal})
+                .otherV()
+                .has('{USER_NAME_PROPERTY}', {tenant_literal})
+                .simplePath()
+            )
+            .emit()
+            .times({traversal_depth})
+            .path()
+            .by(valueMap(true))
+            .by(valueMap(true))
+            """
         )
         rows = self._gremlin_exec(query)
         core_raw = self._get_vertex_by_node_id(center_id, user_name)
@@ -280,11 +339,20 @@ class HugeGraphEdgeMixin:
         """Return a tenant-scoped ordered context chain."""
         tenant = self._tenant(user_name)
         tenant_literal = self._gremlin_literal(tenant)
-        query = (
-            f"g.V({self._gremlin_literal(id)}).has('{USER_NAME_PROPERTY}', {tenant_literal})"
-            f".repeat(outE('{EDGE_LABEL}').has('{USER_NAME_PROPERTY}', {tenant_literal})"
-            f".has('{RELATION_TYPE_KEY}', {self._gremlin_literal(type)})"
-            f".inV().has('{USER_NAME_PROPERTY}', {tenant_literal}).simplePath())"
-            f".emit().values('id')"
+        query = format_gremlin_query(
+            f"""
+            g.V({self._gremlin_literal(id)})
+            .has('{USER_NAME_PROPERTY}', {tenant_literal})
+            .repeat(
+                outE('{EDGE_LABEL}')
+                .has('{USER_NAME_PROPERTY}', {tenant_literal})
+                .has('{RELATION_TYPE_KEY}', {self._gremlin_literal(type)})
+                .inV()
+                .has('{USER_NAME_PROPERTY}', {tenant_literal})
+                .simplePath()
+            )
+            .emit()
+            .values('id')
+            """
         )
         return [str(node_id) for node_id in self._gremlin_exec(query)]

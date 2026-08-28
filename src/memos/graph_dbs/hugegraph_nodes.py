@@ -10,6 +10,7 @@ from memos.graph_dbs.hugegraph_codec import (
     build_vertex_properties,
     unpack_node,
 )
+from memos.graph_dbs.hugegraph_query import format_gremlin_query
 from memos.graph_dbs.hugegraph_schema import (
     EMBEDDING_JSON_PROPERTY,
     MEMORY_TYPE_PROPERTY,
@@ -81,9 +82,12 @@ class HugeGraphNodeMixin:
                 )
 
         node_ids = [node_id for node_id, _ in batch]
-        existing_query = (
-            f"g.V().hasId(within(*{self._gremlin_literal(node_ids)}))"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)}).values('id')"
+        existing_query = format_gremlin_query(
+            f"""
+            g.V().hasId(within(*{self._gremlin_literal(node_ids)}))
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .values('id')
+            """
         )
         existing_ids = {str(node_id) for node_id in self._gremlin_exec(existing_query)}
         for node_id, properties in batch:

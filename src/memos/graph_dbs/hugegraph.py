@@ -18,6 +18,7 @@ from memos.graph_dbs.hugegraph_codec import (
 from memos.graph_dbs.hugegraph_edges import HugeGraphEdgeMixin
 from memos.graph_dbs.hugegraph_maintenance import HugeGraphMaintenanceMixin
 from memos.graph_dbs.hugegraph_nodes import HugeGraphNodeMixin
+from memos.graph_dbs.hugegraph_query import format_gremlin_query
 from memos.graph_dbs.hugegraph_schema import (
     EMBEDDING_JSON_PROPERTY,
     MEMORY_TYPE_PROPERTY,
@@ -179,10 +180,13 @@ class HugeGraphGraphDB(
     ) -> GraphProperties | None:
         """Read one tenant-scoped vertex, with a REST fallback for custom IDs."""
         tenant = self._tenant(user_name)
-        query = (
-            f"g.V({self._gremlin_literal(node_id)})"
-            f".has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})"
-            ".valueMap(true).limit(1)"
+        query = format_gremlin_query(
+            f"""
+            g.V({self._gremlin_literal(node_id)})
+            .has('{USER_NAME_PROPERTY}', {self._gremlin_literal(tenant)})
+            .valueMap(true)
+            .limit(1)
+            """
         )
         rows = self._gremlin_exec(query)
         if rows:

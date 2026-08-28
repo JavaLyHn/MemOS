@@ -4,10 +4,23 @@ from unittest.mock import MagicMock
 import pytest
 
 from memos.graph_dbs.hugegraph import HugeGraphGraphDB
+from memos.graph_dbs.hugegraph_query import format_gremlin_query
 from memos.vec_dbs.index import BaseVectorIndex
 
 
 MEMORY_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def test_format_gremlin_query_dedents_multiline_templates():
+    assert (
+        format_gremlin_query(
+            """
+        g.V()
+          .hasLabel('memory')
+        """
+        )
+        == "g.V().hasLabel('memory')"
+    )
 
 
 def _backend_with_vector_index() -> HugeGraphGraphDB:
