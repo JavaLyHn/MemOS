@@ -1,0 +1,412 @@
+{
+  "fixture_name": "memos-hugegraph-neo4j-compatibility",
+  "description": "Deterministic graph, metadata, lifecycle, and vector data for Neo4j/HugeGraph parity tests.",
+  "tenants": [
+    {
+      "name": "tenant-a",
+      "graphspace": "DEFAULT",
+      "expected_isolation": "tenant-b data must never be returned or mutated"
+    },
+    {
+      "name": "tenant-b",
+      "graphspace": "DEFAULT",
+      "expected_isolation": "tenant-a data must never be returned or mutated"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "tenant": "tenant-a",
+      "memory": "Alice prefers concise answers.",
+      "metadata": {
+        "memory_type": "LongTermMemory",
+        "status": "activated",
+        "mem_cube_id": "cube-a",
+        "key": "preference.concise",
+        "tags": ["response", "style"],
+        "importance": 0.95,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:01+00:00",
+        "embedding": [1.0, 0.0, 0.0]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "tenant": "tenant-a",
+      "memory": "Review Python changes before merging.",
+      "metadata": {
+        "memory_type": "LongTermMemory",
+        "status": "activated",
+        "mem_cube_id": "cube-a",
+        "key": "workflow.review",
+        "tags": ["review", "python"],
+        "importance": 0.8,
+        "created_at": "2026-01-01T00:01:00+00:00",
+        "updated_at": "2026-01-01T00:01:01+00:00",
+        "embedding": [0.8, 0.2, 0.0]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "tenant": "tenant-a",
+      "memory": "回复可以使用中文。",
+      "metadata": {
+        "memory_type": "LongTermMemory",
+        "status": "activated",
+        "mem_cube_id": "cube-a",
+        "key": "language.zh",
+        "tags": ["response", "中文"],
+        "importance": 0.7,
+        "created_at": "2026-01-01T00:02:00+00:00",
+        "updated_at": "2026-01-01T00:02:01+00:00",
+        "embedding": [0.7, 0.3, 0.0]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "tenant": "tenant-a",
+      "memory": "An archived memory should not enter activated recall.",
+      "metadata": {
+        "memory_type": "LongTermMemory",
+        "status": "archived",
+        "mem_cube_id": "cube-a",
+        "key": "archive.note",
+        "tags": ["archive"],
+        "importance": 0.4,
+        "created_at": "2026-01-01T00:03:00+00:00",
+        "updated_at": "2026-01-01T00:03:01+00:00",
+        "embedding": [0.4, 0.6, 0.0]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "tenant": "tenant-a",
+      "memory": "A deleted memory is retained only for lifecycle checks.",
+      "metadata": {
+        "memory_type": "UserMemory",
+        "status": "deleted",
+        "mem_cube_id": "cube-a",
+        "delete_record_id": "delete-record-a-1",
+        "delete_time": "2026-01-01T00:04:00+00:00",
+        "key": "lifecycle.deleted",
+        "tags": ["lifecycle"],
+        "importance": 0.1,
+        "created_at": "2026-01-01T00:04:00+00:00",
+        "updated_at": "2026-01-01T00:04:01+00:00",
+        "embedding": [0.1, 0.9, 0.0]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000006",
+      "tenant": "tenant-a",
+      "memory": "包含中文、双引号 \"、单引号 '、反斜杠 \\\\ 和换行\n第二行。",
+      "metadata": {
+        "memory_type": "UserMemory",
+        "status": "activated",
+        "mem_cube_id": "cube-a",
+        "key": "special.value",
+        "tags": ["unicode", "quote"],
+        "importance": 0.6,
+        "created_at": "2026-01-01T00:05:00+00:00",
+        "updated_at": "2026-01-01T00:05:01+00:00",
+        "embedding": [0.2, 0.8, 0.0]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000011",
+      "tenant": "tenant-b",
+      "memory": "Bob prefers detailed explanations.",
+      "metadata": {
+        "memory_type": "LongTermMemory",
+        "status": "activated",
+        "mem_cube_id": "cube-b",
+        "key": "preference.verbose",
+        "tags": ["response", "detail"],
+        "importance": 0.9,
+        "created_at": "2026-01-02T00:00:00+00:00",
+        "updated_at": "2026-01-02T00:00:01+00:00",
+        "embedding": [0.99, 0.01, 0.0]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000012",
+      "tenant": "tenant-b",
+      "memory": "Bob is working on graph storage.",
+      "metadata": {
+        "memory_type": "WorkingMemory",
+        "status": "activated",
+        "mem_cube_id": "cube-b",
+        "key": "project.graph",
+        "tags": ["graph", "storage"],
+        "importance": 0.75,
+        "created_at": "2026-01-02T00:01:00+00:00",
+        "updated_at": "2026-01-02T00:01:01+00:00",
+        "embedding": [0.6, 0.4, 0.0]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000013",
+      "tenant": "tenant-b",
+      "memory": "Bob's archived planning note.",
+      "metadata": {
+        "memory_type": "UserMemory",
+        "status": "archived",
+        "mem_cube_id": "cube-b",
+        "key": "archive.plan",
+        "tags": ["archive", "planning"],
+        "importance": 0.3,
+        "created_at": "2026-01-02T00:02:00+00:00",
+        "updated_at": "2026-01-02T00:02:01+00:00",
+        "embedding": [0.3, 0.7, 0.0]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "tenant": "tenant-a",
+      "source": "00000000-0000-4000-8000-000000000001",
+      "target": "00000000-0000-4000-8000-000000000003",
+      "type": "PARENT"
+    },
+    {
+      "tenant": "tenant-a",
+      "source": "00000000-0000-4000-8000-000000000001",
+      "target": "00000000-0000-4000-8000-000000000002",
+      "type": "FOLLOWS"
+    },
+    {
+      "tenant": "tenant-a",
+      "source": "00000000-0000-4000-8000-000000000002",
+      "target": "00000000-0000-4000-8000-000000000006",
+      "type": "FOLLOWS"
+    },
+    {
+      "tenant": "tenant-a",
+      "source": "00000000-0000-4000-8000-000000000003",
+      "target": "00000000-0000-4000-8000-000000000002",
+      "type": "SUPPORTS"
+    },
+    {
+      "tenant": "tenant-b",
+      "source": "00000000-0000-4000-8000-000000000011",
+      "target": "00000000-0000-4000-8000-000000000012",
+      "type": "PARENT"
+    }
+  ],
+  "negative_cases": [
+    {
+      "name": "cross_tenant_edge",
+      "tenant": "tenant-a",
+      "source": "00000000-0000-4000-8000-000000000001",
+      "target": "00000000-0000-4000-8000-000000000011",
+      "type": "SUPPORTS",
+      "expected": "reject_without_mutation"
+    },
+    {
+      "name": "tenant_b_reads_tenant_a",
+      "tenant": "tenant-b",
+      "node_id": "00000000-0000-4000-8000-000000000001",
+      "expected": "not_found_without_metadata_leak"
+    },
+    {
+      "name": "missing_node",
+      "tenant": "tenant-a",
+      "node_id": "00000000-0000-4000-8000-000000009999",
+      "expected": "not_found_not_empty_node"
+    }
+  ],
+  "metadata_queries": [
+    {
+      "name": "exact_key",
+      "tenant": "tenant-a",
+      "filters": [{"field": "key", "op": "=", "value": "preference.concise"}],
+      "expected_ids": ["00000000-0000-4000-8000-000000000001"]
+    },
+    {
+      "name": "key_in",
+      "tenant": "tenant-a",
+      "filters": [{"field": "key", "op": "in", "value": ["preference.concise", "workflow.review"]}],
+      "expected_ids": [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002"
+      ]
+    },
+    {
+      "name": "tag_overlap",
+      "tenant": "tenant-a",
+      "filters": [{"field": "tags", "op": "contains", "value": ["python", "missing"]}],
+      "expected_ids": ["00000000-0000-4000-8000-000000000002"]
+    },
+    {
+      "name": "importance_range",
+      "tenant": "tenant-a",
+      "filters": [{"field": "importance", "op": ">=", "value": 0.8}],
+      "expected_ids": [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002"
+      ]
+    },
+    {
+      "name": "key_prefix",
+      "tenant": "tenant-a",
+      "filters": [{"field": "key", "op": "starts_with", "value": "preference."}],
+      "expected_ids": ["00000000-0000-4000-8000-000000000001"]
+    },
+    {
+      "name": "unsupported_operator",
+      "tenant": "tenant-a",
+      "filters": [{"field": "key", "op": "exec", "value": "g.V().drop()"}],
+      "expected": "ValueError_without_graph_mutation"
+    }
+  ],
+  "fulltext_queries": [
+    {
+      "name": "single_word",
+      "tenant": "tenant-a",
+      "query_words": ["concise"],
+      "scope": "LongTermMemory",
+      "status": "activated",
+      "expected_ids": ["00000000-0000-4000-8000-000000000001"]
+    },
+    {
+      "name": "multiple_words",
+      "tenant": "tenant-a",
+      "query_words": ["Python", "merging"],
+      "scope": "LongTermMemory",
+      "status": "activated",
+      "expected_ids": ["00000000-0000-4000-8000-000000000002"],
+      "expected_semantics": "document whether terms are OR, AND, or ranked independently"
+    },
+    {
+      "name": "special_characters",
+      "tenant": "tenant-a",
+      "query_words": ["中文", "引号"],
+      "scope": "UserMemory",
+      "status": "activated",
+      "expected_ids": ["00000000-0000-4000-8000-000000000006"]
+    }
+  ],
+  "vector_queries": [
+    {
+      "name": "tenant_a_long_term_activated",
+      "tenant": "tenant-a",
+      "vector_backend": "qdrant_or_milvus",
+      "vector": [1.0, 0.0, 0.0],
+      "top_k": 5,
+      "scope": "LongTermMemory",
+      "status": "activated",
+      "threshold": 0.0,
+      "expected_order": [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000003"
+      ]
+    },
+    {
+      "name": "tenant_b_isolation",
+      "tenant": "tenant-b",
+      "vector_backend": "qdrant_or_milvus",
+      "vector": [1.0, 0.0, 0.0],
+      "top_k": 5,
+      "scope": "LongTermMemory",
+      "status": "activated",
+      "expected_order": ["00000000-0000-4000-8000-000000000011"],
+      "must_not_contain": [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002"
+      ]
+    },
+    {
+      "name": "threshold_filters_low_score",
+      "tenant": "tenant-a",
+      "vector_backend": "qdrant_or_milvus",
+      "vector": [1.0, 0.0, 0.0],
+      "top_k": 10,
+      "scope": "UserMemory",
+      "status": "activated",
+      "threshold": 0.5,
+      "expected_order": []
+    },
+    {
+      "name": "no_vector_backend",
+      "tenant": "tenant-a",
+      "vector_backend": "none",
+      "vector": [1.0, 0.0, 0.0],
+      "top_k": 5,
+      "expected": "empty_result_with_explicit_warning_or_documented_error"
+    }
+  ],
+  "graph_queries": [
+    {
+      "name": "parent_children",
+      "tenant": "tenant-a",
+      "center_id": "00000000-0000-4000-8000-000000000001",
+      "relation": "PARENT",
+      "direction": "out",
+      "expected_ids": ["00000000-0000-4000-8000-000000000003"]
+    },
+    {
+      "name": "follows_context_chain",
+      "tenant": "tenant-a",
+      "center_id": "00000000-0000-4000-8000-000000000001",
+      "relation": "FOLLOWS",
+      "expected_ids": [
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000006"
+      ]
+    },
+    {
+      "name": "bounded_path",
+      "tenant": "tenant-a",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "target_id": "00000000-0000-4000-8000-000000000006",
+      "max_depth": 2,
+      "expected_path": [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000006"
+      ]
+    },
+    {
+      "name": "subgraph_depth_one",
+      "tenant": "tenant-a",
+      "center_id": "00000000-0000-4000-8000-000000000001",
+      "depth": 1,
+      "center_status": "activated",
+      "expected_node_ids": [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000003"
+      ]
+    },
+    {
+      "name": "subgraph_status_mismatch",
+      "tenant": "tenant-a",
+      "center_id": "00000000-0000-4000-8000-000000000004",
+      "depth": 1,
+      "center_status": "activated",
+      "expected": "no_core_node"
+    }
+  ],
+  "export_import": {
+    "default_export_excludes_status": "deleted",
+    "expected_export_node_ids": [
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+      "00000000-0000-4000-8000-000000000003",
+      "00000000-0000-4000-8000-000000000004",
+      "00000000-0000-4000-8000-000000000006",
+      "00000000-0000-4000-8000-000000000011",
+      "00000000-0000-4000-8000-000000000012",
+      "00000000-0000-4000-8000-000000000013"
+    ],
+    "edge_shape": {"required": ["source", "target", "type"]},
+    "round_trip_invariants": [
+      "node IDs are unchanged",
+      "tenant is unchanged",
+      "metadata values are unchanged after JSON decode",
+      "relation type is unchanged",
+      "embedding is restored only when include_embedding is true"
+    ]
+  }
+}
