@@ -1,0 +1,9 @@
+{
+  "records": [
+    { "modelName": "memory-writer", "tags": ["记忆写入", "32K"], "isReleased": true },
+    { "modelName": "memory-reader", "tags": ["记忆读取", "32K"], "isReleased": true },
+    { "modelName": "embedding-jina-v5", "tags": ["向量化", "本地 ONNX"], "isReleased": true },
+    { "modelName": "rerank-gte", "tags": ["重排", "本地 ONNX"], "isReleased": true },
+    { "modelName": "dream-organizer", "tags": ["记忆整理", "规划中"], "isReleased": false }
+  ]
+}

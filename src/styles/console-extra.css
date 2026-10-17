@@ -1,0 +1,178 @@
+/* 本项目自己的界面用到的工具类。
+ *
+ * styles/base.css 是既有样式表的编译产物，只包含它用过的类；
+ * 我们新写的页面用到的类必须在这里补上，否则不生效（例如图表柱子会没有背景色）。
+ * 数值与 Tailwind v4 的输出保持一致。
+ */
+
+.text-\[\#111111\] {
+  color: #111111;
+}
+.text-\[19px\] {
+  font-size: 19px;
+}
+.tracking-\[-0\.2px\] {
+  letter-spacing: -0.2px;
+}
+
+.bg-\[\#4044ed\]\/80 {
+  background-color: color-mix(in oklab, #4044ed 80%, transparent);
+}
+.bg-\[\#f7f8fb\] {
+  background-color: #f7f8fb;
+}
+.bg-\[\#fbfcfe\] {
+  background-color: #fbfcfe;
+}
+.bg-\[\#ecfdf5\] {
+  background-color: #ecfdf5;
+}
+.bg-\[\#fff7ed\] {
+  background-color: #fff7ed;
+}
+.hover\:bg-\[\#f7f8fb\]:hover {
+  background-color: #f7f8fb;
+}
+
+.border-\[\#a7f3d0\] {
+  border-color: #a7f3d0;
+}
+.border-\[\#dde5f0\] {
+  border-color: #dde5f0;
+}
+.border-\[\#e2e8f0\] {
+  border-color: #e2e8f0;
+}
+.border-\[\#f1f5f9\] {
+  border-color: #f1f5f9;
+}
+.border-\[\#fed7aa\] {
+  border-color: #fed7aa;
+}
+.focus\:border-\[\#4044ed\]:focus {
+  border-color: #4044ed;
+}
+
+.text-\[\#047857\] {
+  color: #047857;
+}
+.text-\[\#475569\] {
+  color: #475569;
+}
+.text-\[\#94a3b8\] {
+  color: #94a3b8;
+}
+.text-\[\#c2410c\] {
+  color: #c2410c;
+}
+.text-\[\#4044ed\] {
+  color: #4044ed;
+}
+
+.max-w-\[860px\] {
+  max-width: 860px;
+}
+.min-w-\[180px\] {
+  min-width: 180px;
+}
+.z-\[999\] {
+  z-index: 999;
+}
+.rounded-t-\[4px\] {
+  border-top-left-radius: 4px;
+  border-top-right-radius: 4px;
+}
+
+/* 收起态用到的几个 */
+.justify-center {
+  justify-content: center;
+}
+.px-0 {
+  padding-left: 0;
+  padding-right: 0;
+}
+.bg-\[\#c2410c\] {
+  background-color: #c2410c;
+}
+.bg-\[\#047857\] {
+  background-color: #047857;
+}
+.w-\[68px\] {
+  width: 68px;
+}
+
+/* 标签页按钮用 data-state 区分选中态。这几条基础样式表里没收录，
+ * 但我们本地那份编译产物没收录，照抄线上实测值补上。 */
+.data-\[state\=active\]\:text-primary[data-state='active'] {
+  color: var(--color-primary);
+}
+.data-\[state\=inactive\]\:text-muted[data-state='inactive'] {
+  color: var(--ui-text-muted);
+}
+.data-\[state\=inactive\]\:hover\:text-primary[data-state='inactive']:hover {
+  color: var(--color-primary);
+}
+.hover\:data-\[state\=inactive\]\:not-disabled\:text-default:hover[data-state='inactive']:not(:disabled) {
+  color: var(--ui-text);
+}
+
+/* 记忆列表页用到、但基础样式表里没有的几条。
+ * 原来的 token 名带内部字样，
+ * 对外页面不能用，改用同一个灰值 #6B7280。 */
+.text-\[\#6B7280\] {
+  color: #6b7280;
+}
+.placeholder\:text-\[\#90A1B9\]::placeholder {
+  color: #90a1b9;
+}
+.hover\:opacity-70:hover {
+  opacity: 0.7;
+}
+
+/* 记忆列表的表格：固定布局、首列是勾选框所以钉 44px。
+ * 这几条挂在 [data-v-1df75f9b] 作用域下，原样保留，
+ * 由页面根节点带上同名属性（我们的组件同样显式传作用域属性）。 */
+[data-v-1df75f9b] .memory-list-table {
+  overflow-x: hidden;
+}
+[data-v-1df75f9b] .memory-list-table table {
+  table-layout: fixed;
+  width: 100%;
+}
+[data-v-1df75f9b] .memory-list-table td,
+[data-v-1df75f9b] .memory-list-table th {
+  overflow: hidden;
+}
+[data-v-1df75f9b] .memory-list-table td:first-child,
+[data-v-1df75f9b] .memory-list-table th:first-child {
+  min-width: 44px;
+  padding-left: 12px;
+  padding-right: 8px;
+  width: 44px;
+}
+
+/* 自定义抽取页的两处滚动条样式，挂在 .custom-extraction 作用域下 */
+.custom-extraction .ce-textarea {
+  overflow-y: auto;
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+  transition: scrollbar-color 0.2s;
+}
+.custom-extraction .ce-textarea:focus,
+.custom-extraction .ce-textarea:hover {
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+.custom-extraction .ce-textarea::-webkit-scrollbar {
+  width: 5px;
+}
+.custom-extraction .ce-textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-extraction .ce-textarea::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+.custom-extraction .ce-textarea:focus::-webkit-scrollbar-thumb,
+.custom-extraction .ce-textarea:hover::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+}

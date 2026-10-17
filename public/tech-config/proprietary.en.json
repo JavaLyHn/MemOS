@@ -1,0 +1,9 @@
+{
+  "records": [
+    { "modelName": "memory-writer", "tags": ["Memory write", "32K"], "isReleased": true },
+    { "modelName": "memory-reader", "tags": ["Memory read", "32K"], "isReleased": true },
+    { "modelName": "embedding-jina-v5", "tags": ["Embedding", "Local ONNX"], "isReleased": true },
+    { "modelName": "rerank-gte", "tags": ["Rerank", "Local ONNX"], "isReleased": true },
+    { "modelName": "dream-organizer", "tags": ["Memory curation", "Planned"], "isReleased": false }
+  ]
+}

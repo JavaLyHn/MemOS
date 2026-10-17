@@ -1,0 +1,7 @@
+{
+  "records": [
+    { "modelName": "deepseek-v3", "provider": "internal-gateway", "tags": ["Chat", "128K"] },
+    { "modelName": "claude-sonnet-4-6", "provider": "internal-gateway", "tags": ["Chat", "200K"] },
+    { "modelName": "qwen3-32b", "provider": "internal-gateway", "tags": ["Chat", "32K"] }
+  ]
+}

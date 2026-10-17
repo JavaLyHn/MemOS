@@ -1,0 +1,17 @@
+node_modules
+dist
+.DS_Store
+*.local
+*.log
+.data
+
+.env
+.env.*
+!.env.example
+
+# 开发期用来跟线上页面做像素/结构比对的脚本与素材，不进仓库
+scripts/
+reference/
+
+# 内部对接笔记，含内网地址与资源名，不进公开仓库
+docs/BACKEND-INTEGRATION.md

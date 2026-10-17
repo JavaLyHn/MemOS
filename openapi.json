@@ -1,0 +1,1619 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MemOS Dashboard API",
+    "version": "0.1.0",
+    "description": "控制台前端依赖的后端接口定义。\n\n## 通用约定\n\n**统一返回格式。** 所有接口返回 `{ code, data, message }`。`code === 0` 表示成功，前端解包后只拿 `data`；非 0 时前端按错误处理，把 `message` 弹成提示。HTTP 状态码不参与判断，200 + 非 0 code 也算失败。\n\n**请求体。** 除少数 GET 外，参数一律放 body，不放 query。字段值为空串或 null 时前端会**删掉该字段**再发出去，后端要按「字段不存在」处理，不要依赖空串。\n\n**分页。** 参数名固定 `pageNum` / `pageSize`，从 1 开始。\n\n**列表响应的键不统一。** 同一个前端里四种写法并存，这是最容易被忽略的地方：\n\n| 接口 | 列表键 | 分页字段 |\n|---|---|---|\n| `project/list`、`keys/list`、`knowledgebase/list`、`knowledgebase/memory/list` | `records` | `total` |\n| `log/list` | `logs` | `total` |\n| `project/memory/list` | `memListItemResponseList` | `total`、`current` |\n| `profileTemplate/list` | `list` | `total`、`current`、`size`、`pages` |\n\n**时间字段。** 一律叫 `createTime`（不是 `createdAt`），值是可被 `dayjs` 直接解析的字符串。\n\n## 错误码\n\n| code | 含义 |\n|---|---|\n| 0 | 成功 |\n| 40000 | 参数错误 |\n| 40001 | 资源不存在 |\n| 40002 | 请求过于频繁 |\n| 40003 | 无权限 |\n| 40100 | 未登录 |\n| 40104 | 未授权 |\n| 50106 | 知识库数量超限 |\n| 50107 | 文档删除中 |\n| 60004 | 容量超限 |\n\n## 模型列表不走接口\n\n「模型列表」页的数据来自静态 JSON（形状 `{ records: [...] }`），由前端从配置目录取，后端不需要实现。\n\n## 鉴权\n\n**控制台目前不发任何鉴权头**，请求里只有 `Content-Type`。所以本接口定义按「无鉴权」描述（根级 `security: []`）。\n\n真实后端要不要加鉴权、加在哪一层需要单独决定：控制台没有登录页，后端若要求 token，前端也要相应改动。"
+  },
+  "security": [],
+  "servers": [
+    {
+      "url": "http://localhost:5280",
+      "description": "本地开发（`pnpm mock`）"
+    }
+  ],
+  "tags": [
+    { "name": "项目", "description": "工作区。几乎所有业务接口都要它的 id。" },
+    { "name": "接口密钥", "description": "密钥的增删查与复制。" },
+    { "name": "调用日志", "description": "调用流水与单条详情。" },
+    { "name": "记忆", "description": "记忆的列表、详情与删除。" },
+    { "name": "知识库", "description": "知识库及其文档、记忆。" },
+    { "name": "属性树模板", "description": "属性树模板的增删改查。" },
+    { "name": "自定义抽取", "description": "抽取 Prompt 的读写与调试。" },
+    { "name": "用量", "description": "按天聚合的调用用量。" },
+    { "name": "技能", "description": "技能包 Markdown。" },
+    { "name": "账号", "description": "额度与订阅。" },
+    { "name": "运行信息", "description": "控制台自身的运行状态。" }
+  ],
+  "paths": {
+    "/api/dashboard/project/dict": {
+      "get": {
+        "tags": ["项目"],
+        "summary": "项目下拉字典",
+        "description": "返回**数组**，不是分页对象。`status === \"ENABLED\"` 的那条是当前项目。",
+        "parameters": [
+          {
+            "name": "language",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "examples": ["zh-CN", "en-US"] }
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ProjectDict" }
+        }
+      }
+    },
+    "/api/dashboard/project/list": {
+      "post": {
+        "tags": ["项目"],
+        "summary": "项目分页列表",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pageNum": { "type": "integer", "default": 1 },
+                  "pageSize": { "type": "integer", "default": 10 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/ProjectRecords" }
+        }
+      }
+    },
+    "/api/dashboard/project/create": {
+      "post": {
+        "tags": ["项目"],
+        "summary": "新建项目",
+        "description": "返回新建的项目对象，前端拿它的 `id` 立刻切过去。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "description"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "description": { "type": "string" },
+                  "isMultiView": { "type": "integer", "enum": [0, 1] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Project" }
+        }
+      }
+    },
+    "/api/dashboard/project/update": {
+      "post": {
+        "tags": ["项目"],
+        "summary": "更新项目 / 切换当前项目",
+        "description": "切换当前项目就是传 `{ id, status: \"ENABLED\" }`，后端要把其它项目置回 `DISABLED`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/Project" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "id": { "type": "string" },
+                      "status": { "type": "string", "enum": ["ENABLED", "DISABLED"] }
+                    },
+                    "required": ["id"]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Project" }
+        }
+      }
+    },
+    "/api/dashboard/project/revoke/{id}": {
+      "post": {
+        "tags": ["项目"],
+        "summary": "删除项目",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" }
+        }
+      }
+    },
+    "/api/dashboard/keys/list": {
+      "post": {
+        "tags": ["接口密钥"],
+        "summary": "密钥分页列表",
+        "description": "列表里下发的 `apiKey` 就是**完整密钥**，没有掩码字段，前端自己截断成 `${key.slice(0,7)}*******${key.slice(-8)}` 展示。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["projectId"],
+                "properties": {
+                  "projectId": { "type": "string" },
+                  "pageNum": { "type": "integer", "default": 1 },
+                  "pageSize": { "type": "integer", "default": 10 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/ApiKeyRecords" }
+        }
+      }
+    },
+    "/api/dashboard/keys/create": {
+      "post": {
+        "tags": ["接口密钥"],
+        "summary": "新建密钥",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["projectId", "keyName"],
+                "properties": {
+                  "projectId": { "type": "string" },
+                  "keyName": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/ApiKey" }
+        }
+      }
+    },
+    "/api/dashboard/keys/revoke/{apiKeyId}": {
+      "post": {
+        "tags": ["接口密钥"],
+        "summary": "吊销密钥",
+        "parameters": [{ "name": "apiKeyId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" }
+        }
+      }
+    },
+    "/api/dashboard/keys/copy": {
+      "post": {
+        "tags": ["接口密钥"],
+        "summary": "取完整密钥",
+        "description": "`data` 是密钥字符串本身，不是对象。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["apiKeyId"],
+                "properties": { "apiKeyId": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/StringData" }
+        }
+      }
+    },
+    "/api/dashboard/log/list": {
+      "post": {
+        "tags": ["调用日志"],
+        "summary": "调用日志分页列表",
+        "description": "`pageSize` 默认 50，前端只渲染返回结果的前 100 条。\n\n`subjectType` 取 `all` / `user` / `agent`；`subjectId` 为空时 `subjectType` 会被强制清空。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["projectId"],
+                "properties": {
+                  "projectId": { "type": "string" },
+                  "pageNum": { "type": "integer", "default": 1 },
+                  "pageSize": { "type": "integer", "default": 50 },
+                  "subjectId": { "type": "string" },
+                  "subjectType": { "type": "string", "enum": ["all", "user", "agent"] },
+                  "eventType": { "$ref": "#/components/schemas/EventType" },
+                  "query": { "type": "string" },
+                  "status": { "type": "string" },
+                  "startTime": { "type": "string" },
+                  "endTime": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/LogList" }
+        }
+      }
+    },
+    "/api/dashboard/log/detail": {
+      "post": {
+        "tags": ["调用日志"],
+        "summary": "调用日志详情",
+        "description": "`requestBody` 与 `responseBody` 是 **JSON 字符串**，不是对象，前端要二次 `JSON.parse`。\n\n`eventType === \"chat\"` 时 `responseBody` 再解析一次：解析结果带 `code` 与 `data` 就直接用，否则包成 `{ code: responseCode, data: <解析结果> }`。\n\n### 详情抽屉按 eventType 取哪些字段\n\n通用字段（每条日志都有）：`status`、`duration`、`traceId`、`userId`、`agentId`、`createTime`、`requestTokens`、`responseTokens`、`requestCode`、`responseCode`、`eventType`。\n\n各类型额外读取的路径（点号分隔，`requestBody` / `responseBody` 解析后的字段）：\n\n| eventType | 请求 | 响应 |\n|---|---|---|\n| `addMessage` | `async_mode` `conversation_id` `allow_memory_view` `messages` `info` | `code` `data.memory_views` `message` |\n| `addFeedback` | `feedback_target` `profile_id` `attr_id` `feedback_content` `feedback_time` | `code` `data.memory_views` `message` |\n| `searchMemory` | `conversation_id` `conversationId` `query` `include_memory_view` `memory_limit_number` `includePreference` `preferenceLimitNumber` `includeToolMemory` `toolMemoryLimitNumber` `includeSkill` `skillLimitNumber` `knowledgebase_ids` `filter` | `code` `data` `message` |\n| `getMessage` | `message_limit_number` | `code` `data.message_detail_list` `message` |\n| `getMemory` | `page` `size` `filter` `include_memory_view` | `code` `data` `message` |\n| `deleteMemory` | `memory_ids` `message_id` | `code` `data` `message` |\n| `manualAddMemory` | `memory_view` `add_time` `algorithm_updatable` `content` | `code` `data` `message` |\n| `updateMemory` | `memory_id` `title` `algorithm_updatable` `content` | `code` `data` `message` |\n| `bindProfileTemplate` | `bind_list` | `code` `message` |\n| `editProfile` | `profile_template_id` `metadata` `remove_fields` | `code` `message` |\n| `deleteProfile` | `profile_template_id` | `code` `message` |\n| `chat` | `conversation_id` `knowledgebase_ids` `query` `filter` `base_prompt` `model_name` `include_preference` `add_message_on_answer` | `code` `data.response` `message` |\n| `extractMemory` | `messages` `extraction_types` | `code` `message`、`data.choices.0.message.content` |\n| `rerank` | `model` `query` `documents` `top_n` | `code` `data.results` `message` |\n\n请求体里的键名风格不统一，既有下划线（`conversation_id`）也有驼峰（`conversationId`），`searchMemory` 两种都会去取。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["logId"],
+                "properties": { "logId": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/LogDetail" }
+        }
+      }
+    },
+    "/api/dashboard/project/memory/list": {
+      "post": {
+        "tags": ["记忆"],
+        "summary": "记忆分页列表",
+        "description": "列表键是 `memListItemResponseList`，不是 `records`。\n\n`memoryDetailType` 决定返回哪一类记忆，取值见 `MemoryDetailType`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["projectId", "memoryDetailType"],
+                "properties": {
+                  "projectId": { "type": "string" },
+                  "memoryDetailType": { "$ref": "#/components/schemas/MemoryDetailType" },
+                  "pageNum": { "type": "integer", "default": 1 },
+                  "pageSize": { "type": "integer", "default": 50 },
+                  "knowledgeBaseId": { "type": "string" },
+                  "startTime": { "type": "string" },
+                  "endTime": { "type": "string" },
+                  "externalUserId": { "type": "string" },
+                  "subjectType": { "$ref": "#/components/schemas/MemorySubjectType" },
+                  "memSearchContent": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/MemoryList" }
+        }
+      }
+    },
+    "/api/dashboard/project/memory/detail": {
+      "post": {
+        "tags": ["记忆"],
+        "summary": "记忆详情",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["memoryId", "memType"],
+                "properties": {
+                  "memoryId": { "type": "string" },
+                  "memType": { "$ref": "#/components/schemas/MemoryDetailType" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Memory" }
+        }
+      }
+    },
+    "/api/dashboard/project/memory/delete": {
+      "post": {
+        "tags": ["记忆"],
+        "summary": "批量删除记忆",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["memory_ids"],
+                "properties": {
+                  "memory_ids": { "type": "array", "items": { "type": "string" } },
+                  "memType": { "$ref": "#/components/schemas/MemoryDetailType" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/DeleteResult" }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/list": {
+      "post": {
+        "tags": ["知识库"],
+        "summary": "知识库分页列表",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pageNum": { "type": "integer", "default": 1 },
+                  "pageSize": { "type": "integer", "default": 10 },
+                  "name": { "type": "string" },
+                  "projectId": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/KnowledgeBaseRecords" }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/create": {
+      "post": {
+        "tags": ["知识库"],
+        "summary": "新建知识库",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["knowledgebaseName"],
+                "properties": {
+                  "knowledgebaseName": { "type": "string" },
+                  "knowledgebaseDescription": { "type": "string" },
+                  "projectIds": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/KnowledgeBase" }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/update": {
+      "post": {
+        "tags": ["知识库"],
+        "summary": "更新知识库",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "knowledgebaseName": { "type": "string" },
+                  "knowledgebaseDescription": { "type": "string" },
+                  "projectIds": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/KnowledgeBase" }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/detail": {
+      "post": {
+        "tags": ["知识库"],
+        "summary": "知识库详情",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["knowledgeBaseId"],
+                "properties": { "knowledgeBaseId": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/KnowledgeBase" }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/file/list": {
+      "post": {
+        "tags": ["知识库"],
+        "summary": "知识库文档列表",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["knowledgeBaseId"],
+                "properties": {
+                  "knowledgeBaseId": { "type": "string" },
+                  "pageNum": { "type": "integer", "default": 1 },
+                  "pageSize": { "type": "integer", "default": 10 },
+                  "fileName": { "type": "string" },
+                  "type": { "type": "string" },
+                  "status": { "$ref": "#/components/schemas/DocumentStatus" },
+                  "startTime": { "type": "string" },
+                  "endTime": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/UntypedRecords" }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/memory/list": {
+      "post": {
+        "tags": ["知识库"],
+        "summary": "知识库的记忆列表",
+        "description": "比其它列表多一个 `size` 字段。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["knowledgeBaseId"],
+                "properties": {
+                  "knowledgeBaseId": { "type": "string" },
+                  "pageNum": { "type": "integer", "default": 1 },
+                  "pageSize": { "type": "integer", "default": 10 },
+                  "query": { "type": "string" },
+                  "userId": { "type": "string" },
+                  "triggerType": { "type": "string" },
+                  "startTime": { "type": "string" },
+                  "endTime": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/MemoryRecords" }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/project/associate": {
+      "post": {
+        "tags": ["知识库"],
+        "summary": "把知识库关联到项目",
+        "description": "传的是该项目的**全量**知识库 id 列表，不在列表里的会被解除关联。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["projectId", "knowledgeBaseIds"],
+                "properties": {
+                  "projectId": { "type": "string" },
+                  "knowledgeBaseIds": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/project/remove": {
+      "post": {
+        "tags": ["知识库"],
+        "summary": "解除知识库与项目的关联",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["projectId", "knowledgeBaseId"],
+                "properties": {
+                  "projectId": { "type": "string" },
+                  "knowledgeBaseId": { "type": "string" },
+                  "deleteAll": { "type": "boolean", "description": "为真时连同知识库本身一起删除" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" }
+        }
+      }
+    },
+    "/api/dashboard/profileTemplate/list": {
+      "post": {
+        "tags": ["属性树模板"],
+        "summary": "属性树模板分页列表",
+        "description": "列表键是 `list`，不是 `records`，且多一个 `pages`。空态是 `{ current: 1, size, total: 0, pages: 0, list: [] }`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["projectId"],
+                "properties": {
+                  "projectId": { "type": "string" },
+                  "pageNum": { "type": "integer", "default": 1 },
+                  "pageSize": { "type": "integer", "default": 10 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/ProfileTemplateList" }
+        }
+      }
+    },
+    "/api/dashboard/profileTemplate/detail": {
+      "get": {
+        "tags": ["属性树模板"],
+        "summary": "属性树模板详情",
+        "description": "少数 GET 之一，参数走 query。",
+        "parameters": [
+          { "name": "templateId", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "projectId", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ProfileTemplate" }
+        }
+      }
+    },
+    "/api/dashboard/profileTemplate/create": {
+      "post": {
+        "tags": ["属性树模板"],
+        "summary": "新建属性树模板",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProfileTemplate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" }
+        }
+      }
+    },
+    "/api/dashboard/profileTemplate/update": {
+      "post": {
+        "tags": ["属性树模板"],
+        "summary": "更新属性树模板",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProfileTemplate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" }
+        }
+      }
+    },
+    "/api/dashboard/profileTemplate/delete": {
+      "post": {
+        "tags": ["属性树模板"],
+        "summary": "删除属性树模板",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["projectId", "templateId"],
+                "properties": {
+                  "projectId": { "type": "string" },
+                  "templateId": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" }
+        }
+      }
+    },
+    "/api/dashboard/prompt-config/detail": {
+      "post": {
+        "tags": ["自定义抽取"],
+        "summary": "读取抽取 Prompt",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProjectScopedRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/PromptConfig" }
+        }
+      }
+    },
+    "/api/dashboard/prompt-config/save": {
+      "post": {
+        "tags": ["自定义抽取"],
+        "summary": "保存抽取 Prompt",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/ProjectScopedRequest" },
+                  {
+                    "type": "object",
+                    "required": ["prompt"],
+                    "properties": { "prompt": { "type": "string" } }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" }
+        }
+      }
+    },
+    "/api/dashboard/prompt-config/generate": {
+      "post": {
+        "tags": ["自定义抽取"],
+        "summary": "按一句话描述生成 Prompt",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/ProjectScopedRequest" },
+                  {
+                    "type": "object",
+                    "required": ["description"],
+                    "properties": { "description": { "type": "string" } }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Prompt" }
+        }
+      }
+    },
+    "/api/dashboard/prompt-config/reset-default": {
+      "post": {
+        "tags": ["自定义抽取"],
+        "summary": "恢复默认 Prompt",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProjectScopedRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Prompt" }
+        }
+      }
+    },
+    "/api/dashboard/prompt-config/debug/extract": {
+      "post": {
+        "tags": ["自定义抽取"],
+        "summary": "快速调试：对一段文本跑抽取",
+        "description": "`messages` 是标准的 chat 消息数组，前端传一条 `user` 消息。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/ProjectScopedRequest" },
+                  {
+                    "type": "object",
+                    "required": ["messages"],
+                    "properties": {
+                      "messages": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "required": ["role", "content"],
+                          "properties": {
+                            "role": { "type": "string", "enum": ["system", "user", "assistant"] },
+                            "content": { "type": "string" }
+                          }
+                        }
+                      },
+                      "extractionTypes": {
+                        "type": "array",
+                        "items": { "$ref": "#/components/schemas/MemoryDetailType" }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/ExtractDebug" }
+        }
+      }
+    },
+    "/api/dashboard/usage/query": {
+      "post": {
+        "tags": ["用量"],
+        "summary": "按天聚合的用量",
+        "description": "`projectId` 传 `\"all\"` 时会被改写成空串再发出。`startDate` / `endDate` 格式 `YYYY-MM-DD`，默认当月 1 号到今天。\n\n`dailyStats` 的每项里，`extractMemory` 与 `rerank` 可能缺失，前端用可选链读。响应里除 `dailyStats` 外的字段前端没有读取。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["projectId"],
+                "properties": {
+                  "projectId": { "type": "string", "description": "传 \"all\" 表示全部" },
+                  "apiKeyId": { "type": "string" },
+                  "startDate": { "type": "string", "format": "date" },
+                  "endDate": { "type": "string", "format": "date" },
+                  "includeDailyDetails": { "type": "boolean", "default": true }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/UsageQuery" }
+        }
+      }
+    },
+    "/api/dashboard/skill/skillMD": {
+      "post": {
+        "tags": ["技能"],
+        "summary": "取技能包 Markdown",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["oss_url"],
+                "properties": { "oss_url": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/StringData" }
+        }
+      }
+    },
+    "/api/user/quota/summary": {
+      "get": {
+        "tags": ["账号"],
+        "summary": "额度概览",
+        "parameters": [{ "name": "knowledgebaseId", "in": "query", "required": false, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/QuotaSummary" }
+        }
+      }
+    },
+    "/api/user/subscription/details": {
+      "post": {
+        "tags": ["账号"],
+        "summary": "订阅周期",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "cycleId": { "type": "string" },
+                  "includeAllCycles": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/SubscriptionDetails" }
+        }
+      }
+    },
+    "/api/meta": {
+      "get": {
+        "tags": ["运行信息"],
+        "summary": "控制台运行信息",
+        "description": "控制台自有的扩展接口，用于在界面上标注当前数据来源、密钥前缀与可用工具。",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Meta" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Envelope": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+          "code": { "type": "integer", "description": "0 表示成功；非 0 时前端按错误处理并弹出 message" },
+          "message": { "type": "string" },
+          "data": {}
+        }
+      },
+      "Project": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "status": { "type": "string", "enum": ["ENABLED", "DISABLED"], "description": "`ENABLED` 的那条是当前项目" },
+          "createTime": { "type": "string" },
+          "isMultiView": { "type": "integer", "enum": [0, 1] }
+        }
+      },
+      "ProjectDictItem": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "status": { "type": "string", "enum": ["ENABLED", "DISABLED"] }
+        }
+      },
+      "ApiKey": {
+        "type": "object",
+        "required": ["id", "keyName", "apiKey", "createTime"],
+        "properties": {
+          "id": { "type": "string" },
+          "keyName": { "type": "string" },
+          "apiKey": { "type": "string", "description": "完整密钥，列表里也下发，前端自己截断展示" },
+          "createTime": { "type": "string" }
+        }
+      },
+      "EventType": {
+        "type": "string",
+        "description": "调用事件类型。前 10 个出现在列表页的筛选下拉里，后 4 个只出现在详情页的字段表里。",
+        "enum": [
+          "addMessage",
+          "searchMemory",
+          "getMemory",
+          "deleteMemory",
+          "addFeedback",
+          "manualAddMemory",
+          "updateMemory",
+          "bindProfileTemplate",
+          "editProfile",
+          "deleteProfile",
+          "getMessage",
+          "chat",
+          "extractMemory",
+          "rerank"
+        ]
+      },
+      "LogStatus": {
+        "type": "string",
+        "description": "`SUCCESS` 与 `success` 都判为成功，其余判为失败"
+      },
+      "RequestLog": {
+        "type": "object",
+        "required": ["id", "createTime", "eventType", "status"],
+        "properties": {
+          "id": { "type": "string" },
+          "createTime": { "type": "string" },
+          "eventType": { "$ref": "#/components/schemas/EventType" },
+          "userIds": { "type": "array", "items": { "type": "string" } },
+          "agentIds": { "type": "array", "items": { "type": "string" } },
+          "status": { "$ref": "#/components/schemas/LogStatus" },
+          "duration": { "type": "number", "description": "毫秒数，前端拼 `ms` 展示" }
+        }
+      },
+      "LogDetail": {
+        "type": "object",
+        "required": ["id", "createTime", "eventType", "status"],
+        "properties": {
+          "id": { "type": "string" },
+          "createTime": { "type": "string" },
+          "eventType": { "$ref": "#/components/schemas/EventType" },
+          "status": { "$ref": "#/components/schemas/LogStatus" },
+          "duration": { "type": "number" },
+          "traceId": { "type": "string" },
+          "userId": { "type": "string" },
+          "agentId": { "type": "string" },
+          "requestTokens": { "type": "integer" },
+          "responseTokens": { "type": "integer" },
+          "requestCode": { "type": "integer" },
+          "responseCode": { "type": "integer" },
+          "requestBody": { "type": "string", "description": "JSON 字符串，前端二次 parse" },
+          "responseBody": { "type": "string", "description": "JSON 字符串，前端二次 parse" }
+        }
+      },
+      "MemorySubjectType": {
+        "type": "string",
+        "enum": ["user", "agent", "public"]
+      },
+      "MemoryDetailType": {
+        "type": "string",
+        "description": "记忆类型。`text_mem` 事实记忆、`pref_mem` 偏好记忆、`event_mem` 事件记忆、`profile_mem` 属性树记忆、`skill_mem` 技能、`tool_mem` 工具记忆。",
+        "enum": ["text_mem", "pref_mem", "event_mem", "profile_mem", "skill_mem", "tool_mem"]
+      },
+      "Memory": {
+        "type": "object",
+        "required": ["memoryId", "memoryContent", "createTime"],
+        "properties": {
+          "memoryId": { "type": "string" },
+          "memoryContent": { "type": "string" },
+          "subjectType": { "$ref": "#/components/schemas/MemorySubjectType" },
+          "externalUserId": { "type": "string" },
+          "createTime": { "type": "string" },
+          "skillName": { "type": "string", "description": "`skill_mem` 专有" },
+          "skillUrl": { "type": "string", "description": "`skill_mem` 专有" },
+          "profileTemplateId": { "type": "string", "description": "`profile_mem` 专有" },
+          "profileInstanceId": { "type": "string", "description": "`profile_mem` 专有" }
+        }
+      },
+      "KnowledgeBase": {
+        "type": "object",
+        "required": ["kbId", "knowledgebaseName"],
+        "properties": {
+          "kbId": { "type": "string" },
+          "knowledgebaseName": { "type": "string" },
+          "knowledgebaseDescription": { "type": "string" },
+          "projectIds": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "DocumentStatus": {
+        "type": "string",
+        "enum": ["waiting", "uploading", "processing", "available", "deleting", "failed", "processFailed"]
+      },
+      "ProfileTemplateField": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "string" },
+          "algorithm_updatable": { "type": "boolean", "description": "该字段是否允许算法自动更新" }
+        }
+      },
+      "ProfileTemplateGroup": {
+        "type": "object",
+        "description": "分组 → 字段 → `{ value, algorithm_updatable }`",
+        "additionalProperties": { "$ref": "#/components/schemas/ProfileTemplateField" }
+      },
+      "ProfileTemplate": {
+        "type": "object",
+        "description": "模板对象。除下列元信息外，其余键都当作分组数据，形状是「分组 → 字段 → `{ value, algorithm_updatable }`」。",
+        "properties": {
+          "templateId": { "type": "string" },
+          "templateName": { "type": "string" },
+          "projectId": { "type": "string" },
+          "bindingCount": { "type": "integer" },
+          "updatedAt": { "type": "string" }
+        },
+        "additionalProperties": { "$ref": "#/components/schemas/ProfileTemplateGroup" }
+      },
+      "PromptConfig": {
+        "type": "object",
+        "properties": {
+          "prompt": { "type": "string" },
+          "projectId": { "type": "string" },
+          "updatedAt": { "type": "string" }
+        }
+      },
+      "ExtractResult": {
+        "type": "object",
+        "properties": {
+          "type": { "$ref": "#/components/schemas/MemoryDetailType" },
+          "content": { "type": "string" }
+        }
+      },
+      "UsageDailyStat": {
+        "type": "object",
+        "required": ["date"],
+        "properties": {
+          "date": { "type": "string", "format": "date" },
+          "addMessage": { "$ref": "#/components/schemas/UsageCalls" },
+          "searchMemory": { "$ref": "#/components/schemas/UsageCalls" },
+          "chat": { "$ref": "#/components/schemas/UsageTokens" },
+          "extractMemory": { "$ref": "#/components/schemas/UsageTokens" },
+          "rerank": { "$ref": "#/components/schemas/UsageCalls" }
+        }
+      },
+      "UsageCalls": {
+        "type": "object",
+        "properties": {
+          "calls": { "type": "integer" },
+          "totalTokens": { "type": "integer" }
+        }
+      },
+      "UsageTokens": {
+        "type": "object",
+        "properties": {
+          "requestTokens": { "type": "integer" },
+          "responseTokens": { "type": "integer" },
+          "totalTokens": { "type": "integer" }
+        }
+      },
+      "QuotaSummary": {
+        "type": "object",
+        "properties": {
+          "memoryCount": { "type": "integer" },
+          "knowledgebaseCount": { "type": "integer" },
+          "knowledgebaseCapacity": { "type": "integer" },
+          "allowedKnowledgebaseCount": { "type": "integer" }
+        }
+      },
+      "SubscriptionDetails": {
+        "type": "object",
+        "properties": {
+          "cycles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "cycleStartTime": { "type": "string" },
+                "cycleEndTime": { "type": "string" }
+              }
+            }
+          },
+          "currentCycle": {
+            "type": "object",
+            "properties": { "id": { "type": "string" } }
+          }
+        }
+      },
+      "ToolInfo": {
+        "type": "object",
+        "description": "服务暴露的一个 MCP 工具，接入说明与示例命令据此生成",
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      },
+      "Meta": {
+        "type": "object",
+        "required": ["mode", "keyPrefix", "tools"],
+        "properties": {
+          "mode": { "type": "string", "enum": ["sample", "live"], "description": "`sample` 示例后端，`live` 真实后端" },
+          "service": { "type": "string" },
+          "health": { "type": ["object", "null"] },
+          "keyPrefix": { "type": "string", "description": "新建密钥的展示与校验用它" },
+          "tools": { "type": "array", "items": { "$ref": "#/components/schemas/ToolInfo" } }
+        }
+      },
+      "ProjectScopedRequest": {
+        "type": "object",
+        "properties": { "projectId": { "type": "string" } }
+      }
+    },
+    "responses": {
+      "Ok": {
+        "description": "成功",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "type": "object", "additionalProperties": true } } }
+              ]
+            }
+          }
+        }
+      },
+      "StringData": {
+        "description": "成功，`data` 是字符串",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "string" } } }]
+            }
+          }
+        }
+      },
+      "DeleteResult": {
+        "description": "成功，返回删除条数",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": { "deleted": { "type": "integer" } }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "Project": {
+        "description": "成功，返回项目对象",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Project" } } }
+              ]
+            }
+          }
+        }
+      },
+      "ProjectDict": {
+        "description": "成功，`data` 是项目数组",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": { "type": "array", "items": { "$ref": "#/components/schemas/ProjectDictItem" } }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ProjectRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["records", "total"],
+                      "properties": {
+                        "records": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } },
+                        "total": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ApiKey": {
+        "description": "成功，返回密钥对象",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ApiKey" } } }
+              ]
+            }
+          }
+        }
+      },
+      "ApiKeyRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["records", "total"],
+                      "properties": {
+                        "records": { "type": "array", "items": { "$ref": "#/components/schemas/ApiKey" } },
+                        "total": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "LogList": {
+        "description": "成功，列表键 `logs`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["logs", "total"],
+                      "properties": {
+                        "logs": { "type": "array", "items": { "$ref": "#/components/schemas/RequestLog" } },
+                        "total": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "LogDetail": {
+        "description": "成功，返回日志详情",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/LogDetail" } } }
+              ]
+            }
+          }
+        }
+      },
+      "Memory": {
+        "description": "成功，返回记忆对象",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Memory" } } }
+              ]
+            }
+          }
+        }
+      },
+      "MemoryList": {
+        "description": "成功，列表键 `memListItemResponseList`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["memListItemResponseList", "total"],
+                      "properties": {
+                        "memListItemResponseList": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/Memory" }
+                        },
+                        "total": { "type": "integer" },
+                        "current": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "MemoryRecords": {
+        "description": "成功，列表键 `records`，多一个 `size`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["records", "total"],
+                      "properties": {
+                        "records": { "type": "array", "items": { "$ref": "#/components/schemas/Memory" } },
+                        "total": { "type": "integer" },
+                        "size": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "UntypedRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["records", "total"],
+                      "properties": {
+                        "records": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                        "total": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "KnowledgeBase": {
+        "description": "成功，返回知识库对象",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/KnowledgeBase" } } }
+              ]
+            }
+          }
+        }
+      },
+      "KnowledgeBaseRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["records", "total"],
+                      "properties": {
+                        "records": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBase" } },
+                        "total": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ProfileTemplate": {
+        "description": "成功，返回模板对象",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ProfileTemplate" } } }
+              ]
+            }
+          }
+        }
+      },
+      "ProfileTemplateList": {
+        "description": "成功，列表键 `list`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["list", "total"],
+                      "properties": {
+                        "list": { "type": "array", "items": { "$ref": "#/components/schemas/ProfileTemplate" } },
+                        "total": { "type": "integer" },
+                        "current": { "type": "integer" },
+                        "size": { "type": "integer" },
+                        "pages": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "PromptConfig": {
+        "description": "成功，返回 Prompt 配置",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/PromptConfig" } } }
+              ]
+            }
+          }
+        }
+      },
+      "Prompt": {
+        "description": "成功，返回一段 Prompt",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": { "prompt": { "type": "string" } }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ExtractDebug": {
+        "description": "成功，返回抽取结果",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "extractionTypes": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/MemoryDetailType" }
+                        },
+                        "results": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/ExtractResult" }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "UsageQuery": {
+        "description": "成功，返回按天聚合的用量",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["dailyStats"],
+                      "properties": {
+                        "dailyStats": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/UsageDailyStat" }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "QuotaSummary": {
+        "description": "成功，返回额度对象",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/QuotaSummary" } } }
+              ]
+            }
+          }
+        }
+      },
+      "SubscriptionDetails": {
+        "description": "成功，返回订阅周期",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/SubscriptionDetails" } } }
+              ]
+            }
+          }
+        }
+      },
+      "Meta": {
+        "description": "成功，返回运行信息",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                { "$ref": "#/components/schemas/Envelope" },
+                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Meta" } } }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}
