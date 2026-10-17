@@ -1,0 +1,5 @@
+# 含明文 token，任何情况下都不要提交
+tenants.conf
+
+__pycache__/
+**/__pycache__/
