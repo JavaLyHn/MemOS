@@ -1,8 +1,7 @@
-/** 共用组件。表格与分页的类名逐字取自设计稿，勿随意增删。 */
-
 import type { ReactNode } from 'react'
+import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { Icon } from './Icon'
-import { BTN_DIALOG_CLOSE, BTN_PAGE_ACTIVE, BTN_PAGER, BTN_PRIMARY, BTN_TEXT_LINK } from '../lib/cls'
+import { EmptyState } from './ui/empty-state'
 import { useT } from '../lib/store'
 
 /** 标签的展示色。成功 / 失败两种，另留一档中性色 */
@@ -11,8 +10,7 @@ export type Tone = 'ok' | 'warn' | 'default'
 /** 表格所在页面的作用域属性，表格样式挂在这个属性下 */
 export const T = { 'data-v-13b6c0ea': '' } as const
 
-export const TH =
-  'px-4 py-3.5 text-sm text-left rtl:text-right [&:has([role=checkbox])]:pe-0 text-second-gray font-normal red-header-[#E2E8F0]'
+export const TH = 'px-4 py-3.5 text-sm text-left rtl:text-right [&:has([role=checkbox])]:pe-0 text-second-gray font-normal'
 
 /** 表格 td 基类，默认不换行；需要折行的列自己追加 break-all */
 export const TD = 'p-4 text-sm whitespace-nowrap [&:has([role=checkbox])]:pe-0 py-3 text-second-gray leading-5'
@@ -22,15 +20,18 @@ export const TD_BREAK = `${TD} whitespace-break-spaces break-all`
 
 export function PageHeader({ title, desc, actions }: { title: string; desc?: string; actions?: ReactNode }) {
   return (
-    <div className="flex justify-between items-center mb-4">
+    // ⚠️ 右侧必须 `shrink-0`：左边是「标题 + 一段可能很长的说明」，不加的话 flex 会去压
+    // 右边那一栏，操作按钮被挤出可视区（用量监控页的三个区间键就是这么被截掉的）。
+    // 左边配 `min-w-0` + `truncate`，让它自己先收缩。
+    <div className="flex justify-between items-center gap-4 mb-4">
       <div className="flex items-center gap-2 min-w-0">
         <div className="flex min-w-0 items-end gap-2">
-          <h2 className="text-lg text-[#303133] font-semibold leading-6.25">{title}</h2>
-          {desc && <p className="text-sm text-[#606266] leading-5.5">{desc}</p>}
+          <h2 className="text-lg text-ink font-semibold leading-6.25 shrink-0">{title}</h2>
+          {desc && <p className="text-sm text-ink-secondary leading-5.5 truncate">{desc}</p>}
         </div>
       </div>
       {actions && (
-        <div>
+        <div className="shrink-0">
           <div className="flex items-center gap-3">{actions}</div>
         </div>
       )}
@@ -41,7 +42,7 @@ export function PageHeader({ title, desc, actions }: { title: string; desc?: str
 /** 表格外框。只有「调用日志」页加高度上限，其余页不限高 */
 export function Panel({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
-    <div {...T} className={`relative overflow-auto border-1 border-[#E2E8F0] rounded-[12px] bg-white ${className}`}>
+    <div {...T} className={`relative overflow-auto border border-line rounded-xl bg-surface shadow-2xs ${className}`}>
       {children}
     </div>
   )
@@ -49,12 +50,11 @@ export function Panel({ children, className = '' }: { children: ReactNode; class
 
 export function Table({ head, children }: { head: ReactNode; children: ReactNode }) {
   return (
-    <table className="min-w-full overflow-clip">
-      <thead className="sticky top-0 inset-x-0 z-[1] backdrop-blur-none bg-default">
-        <tr className="data-[selected=true]:bg-elevated/50">{head}</tr>
-        <tr className="absolute z-[1] left-0 w-full h-px bg-(--ui-border-accented)" />
+    <table className="min-w-full overflow-clip text-left">
+      <thead className="sticky top-0 inset-x-0 z-[1] bg-surface-muted/90 backdrop-blur-sm border-b border-line text-xs font-medium text-ink-muted">
+        <tr>{head}</tr>
       </thead>
-      <tbody className="divide-y divide-default [&>tr]:cursor-pointer [&>tr]:data-[selectable=true]:hover:bg-elevated/50 [&>tr]:data-[selectable=true]:focus-visible:outline-primary">
+      <tbody className="divide-y divide-line [&>tr]:transition-colors [&>tr]:animate-[row-in_180ms_ease-out_both] [&>tr]:data-[selectable=true]:hover:bg-surface-hover/70">
         {children}
       </tbody>
     </table>
@@ -69,55 +69,147 @@ export function Th({ children }: { children: ReactNode }) {
   )
 }
 
+/** 功能还没开放的页面，统一的占位面板。
+ *
+ *  ⚠️ 为什么要有这个组件：画像模板与知识库原来各写了一份，**长得不一样**——
+ *  一个带 🚧、一个不带，间距和字号也不同。2026-10-19 用户的原话是
+ *  「建设中的文案，样式，你可以统一一点呀。复用组件会不会？」。
+ *  两份手写的空态还有个更实际的问题：改文案要改两处，漏一处就又不一样了。
+ *
+ *  ⚠️ 不带 🚧 / ✨ 这类装饰字符：`AGENTS.md` 第二节明确写了不用它们撑气氛。
+ *  知识库原来那版是带 🚧 的，统一时去掉了。
+ *
+ *  ⚠️ `flex-1` 让它吃掉 PageHeader 之外的全部高度；外层**不要**加 `max-w-[…]`，
+ *  那会把页面卡成一条窄栏（2026-10-19 用户报过的布局 bug）。 */
+export function ComingSoon() {
+  const t = useT()
+  return (
+    <Panel className="flex-1 min-h-[420px] flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+      <div className="size-14 rounded-2xl bg-surface-hover/80 border border-line flex items-center justify-center text-ink-faint mb-1 shadow-2xs">
+        <Icon name="i-lucide:compass" className="size-6 text-ink-faint" />
+      </div>
+      <h3 className="text-base font-semibold text-ink tracking-tight">{t('common.comingSoon')}</h3>
+      <p className="max-w-[460px] text-xs leading-relaxed text-ink-muted">{t('common.comingSoonDesc')}</p>
+    </Panel>
+  )
+}
+
 /** 加载 / 空 / 出错三种状态的整行占位 */
 export function StateRow({ colSpan, state, error }: { colSpan: number; state: 'loading' | 'ready' | 'error'; error?: string }) {
   const t = useT()
   if (state === 'ready') {
     return (
       <tr>
-        <td colSpan={colSpan} className="py-6 text-center text-sm text-muted">
-          No data
+        <td colSpan={colSpan}>
+          <EmptyState compact title={t('common.noData')} />
         </td>
       </tr>
     )
   }
-  const text = state === 'loading' ? t('common.loading') : `${t('common.failed')}：${error ?? ''}`
+  if (state === 'loading') {
+    return (
+      <>
+        {[1, 2, 3, 4, 5].map((idx) => (
+          <tr key={idx} className="border-b border-line">
+            <td colSpan={colSpan} className="px-4 py-3.5">
+              <div className="flex items-center gap-4">
+                <div className="h-4 w-4 rounded bg-line/60 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent shrink-0" />
+                <div className="h-4 w-28 rounded bg-line/60 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent" />
+                <div className="h-4 w-40 rounded bg-line/50 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent" />
+                <div className="h-4 flex-1 rounded bg-line/40 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent" />
+                <div className="h-4 w-16 rounded bg-line/60 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent shrink-0" />
+              </div>
+            </td>
+          </tr>
+        ))}
+      </>
+    )
+  }
+  // `error` 已经是一句完整的话（见 useAsync/errText），不要再在前面拼一次「请求失败：」
+  const text = error || t('common.failed')
   return (
     <tr>
-      <td colSpan={colSpan} className="py-6 text-center text-sm text-muted">
-        {text}
+      <td colSpan={colSpan}>
+        {/* 失败态用 warning 色图标 + 正文色文字：错误原文要能读清，而不是一行灰字 */}
+        <EmptyState compact icon="i-lucide:alert-circle" title={text} />
       </td>
     </tr>
   )
 }
 
+/** 分页。
+ *
+ *  ⚠️ 别再退回「只渲染当前页那一个数字」的写法：业务看不出总共有多少页、也看不出能不能
+ *  往后翻，只能靠试探着点箭头（2026-10-19 用户报的）。现在给出两样东西：
+ *    - 左侧一句 `共 N 条 · 第 X / Y 页`，一眼看到规模和位置；
+ *    - 右侧窗口式页码：首页、末页、当前页 ±1 一定显示，其余折叠成 `…`，
+ *      这样 200 页也不会把一行撑爆。
+ *
+ *  首/末/上/下一页仍然保留，`aria-label` 不变——验收脚本按它找按钮。 */
 export function Pager({ page, pageSize, total, onPage }: { page: number; pageSize: number; total: number; onPage: (p: number) => void }) {
   const t = useT()
   const pages = Math.max(1, Math.ceil(total / pageSize))
   const btn = (label: string, icon: string, target: number, disabled: boolean) => (
-    <button type="button" disabled={disabled} aria-label={label} className={BTN_PAGER} onClick={() => onPage(target)}>
-      <Icon name={icon} className="shrink-0 size-5" />
+    <button
+      type="button"
+      disabled={disabled}
+      aria-label={label}
+      className="p-1 rounded-md border border-line bg-surface-muted hover:bg-surface-hover text-ink-secondary disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer shadow-2xs"
+      onClick={() => onPage(target)}
+    >
+      <Icon name={icon} className="shrink-0 size-4 text-ink-muted" />
     </button>
   )
+
+  // 窗口式页码：首末页 + 当前页 ±1，中间的连续区间折叠成一个 `…`
+  const items: (number | '…')[] = []
+  for (let p = 1; p <= pages; p++) {
+    if (p === 1 || p === pages || Math.abs(p - page) <= 1) items.push(p)
+    else if (items[items.length - 1] !== '…') items.push('…')
+  }
+
   return (
-    <div {...T} className="flex justify-between items-center pt-4">
-      <div {...T} />
-      <nav {...T}>
-        <div className="flex items-center gap-1">
-          {btn(t('common.firstPage'), 'i-lucide:chevrons-left', 1, page <= 1)}
-          {btn(t('common.prevPage'), 'i-lucide:chevron-left', page - 1, page <= 1)}
-          <button type="button" data-type="page" aria-current="page" data-selected="true" className={BTN_PAGE_ACTIVE}>
-            <span className="truncate min-w-5 text-center">{page}</span>
-          </button>
-          {btn(t('common.nextPage'), 'i-lucide:chevron-right', page + 1, page >= pages)}
-          {btn(t('common.lastPage'), 'i-lucide:chevrons-right', pages, page >= pages)}
-        </div>
+    <div {...T} className="flex flex-wrap justify-between items-center gap-3 pt-4">
+      <div {...T} className="text-xs text-ink-muted">
+        {t('common.total')(total)}
+        <span className="mx-2 text-ink-faint">·</span>
+        {t('common.pageOf')(page, pages)}
+      </div>
+      <nav {...T} className="flex items-center gap-1">
+        {btn(t('common.firstPage'), 'i-lucide:chevrons-left', 1, page <= 1)}
+        {btn(t('common.prevPage'), 'i-lucide:chevron-left', page - 1, page <= 1)}
+        {items.map((it, i) =>
+          it === '…' ? (
+            <span key={`gap-${i}`} className="px-1.5 text-xs text-ink-faint select-none" aria-hidden="true">
+              …
+            </span>
+          ) : (
+            <button
+              key={it}
+              type="button"
+              data-type="page"
+              aria-current={it === page ? 'page' : undefined}
+              data-selected={it === page ? 'true' : undefined}
+              aria-label={t('common.pageOf')(it, pages)}
+              className={`min-w-7 h-7 px-2 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+                it === page
+                  ? 'bg-accent text-on-accent shadow-2xs'
+                  : 'text-ink-secondary hover:bg-surface-hover border border-line bg-surface-muted/60'
+              }`}
+              onClick={() => onPage(it)}
+            >
+              <span>{it}</span>
+            </button>
+          ),
+        )}
+        {btn(t('common.nextPage'), 'i-lucide:chevron-right', page + 1, page >= pages)}
+        {btn(t('common.lastPage'), 'i-lucide:chevrons-right', pages, page >= pages)}
       </nav>
     </div>
   )
 }
 
-/** 对话框。遮罩 fade-in、面板 scale-in，各 200ms */
+/** 对话框。采用 Radix UI Dialog 原语，自带 Portal、Focus Trap 与 Escape 键无障碍支持 */
 export function Dialog({
   open,
   title,
@@ -131,31 +223,35 @@ export function Dialog({
   children: ReactNode
   footer?: ReactNode
 }) {
-  if (!open) return null
   return (
-    <>
-      <div
-        data-state="open"
-        onClick={onClose}
-        className="fixed inset-0 bg-overlay data-[state=open]:animate-[fade-in_200ms_ease-out] data-[state=closed]:animate-[fade-out_200ms_ease-in]"
-      />
-      <div
-        role="dialog"
-        data-state="open"
-        className="fixed bg-default divide-y divide-default flex flex-col focus:outline-none data-[state=open]:animate-[scale-in_200ms_ease-out] data-[state=closed]:animate-[scale-out_200ms_ease-in] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[calc(100vw-2rem)] max-w-lg max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-4rem)] shadow-lg ring ring-default overflow-hidden rounded-[12px]"
-      >
-        <div className="flex items-center gap-1.5 p-4 sm:px-6 min-h-16 border-b-0 pt-5 pb-6 text-lg leading-6.25">
-          <div>
-            <h2 className="text-highlighted font-semibold">{title}</h2>
+    <DialogPrimitive.Root open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[3px] data-[state=open]:animate-[dialog-overlay-in_180ms_ease-out] data-[state=closed]:animate-[dialog-overlay-out_140ms_ease-in]" />
+        {/* ⚠️ 居中由 Tailwind v4 的 `translate` **属性**负责，不是 `transform`。
+            所以关键帧里只写 scale / translateY，不能再写 `translate(-50%,-50%)`——
+            v4 把位移拆成了独立属性，两处同时写会叠加成双倍平移。
+            原来的 `scale-in` 则相反：只写 `transform: scale()`，把位移覆盖掉了。
+            见 console-extra.css 的 `dialog-in` / `dialog-out`。 */}
+        <DialogPrimitive.Content className="fixed z-50 bg-surface border border-line flex flex-col focus:outline-none data-[state=open]:animate-[dialog-in_190ms_cubic-bezier(0.16,1,0.3,1)] data-[state=closed]:animate-[dialog-out_140ms_ease-in] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[calc(100vw-2rem)] max-w-lg max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-4rem)] shadow-2xl overflow-hidden rounded-2xl">
+          <div className="flex items-center justify-between px-6 py-4.5 min-h-16 border-b border-line">
+            <DialogPrimitive.Title className="text-base font-semibold text-ink leading-6">{title}</DialogPrimitive.Title>
+            <DialogPrimitive.Close asChild>
+              <button
+                type="button"
+                aria-label="Close"
+                className="p-1 rounded-lg text-ink-faint hover:text-ink-secondary hover:bg-surface-hover transition-colors cursor-pointer"
+              >
+                <Icon name="i-lucide:x" className="shrink-0 size-4.5" />
+              </button>
+            </DialogPrimitive.Close>
           </div>
-          <button type="button" aria-label="Close" className={BTN_DIALOG_CLOSE} onClick={onClose}>
-            <Icon name="i-lucide:x" className="shrink-0 size-5" />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 pt-0! border-[#E2E8F0]">{children}</div>
-        {footer && <div className="flex items-center p-4 sm:px-6 gap-2">{footer}</div>}
-      </div>
-    </>
+          <div className="flex-1 overflow-y-auto px-6 py-5 text-sm text-ink-secondary">{children}</div>
+          {footer && (
+            <div className="flex items-center justify-end px-6 py-3.5 gap-2.5 border-t border-line bg-surface-muted/60">{footer}</div>
+          )}
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   )
 }
 
@@ -171,8 +267,13 @@ export function PrimaryButton({
   icon?: string
 }) {
   return (
-    <button type="button" className={BTN_PRIMARY} onClick={onClick} disabled={disabled}>
-      {icon && <Icon name={icon} className="shrink-0 size-5" />}
+    <button
+      type="button"
+      className="inline-flex items-center justify-center gap-1.5 h-8.5 px-3.5 rounded-lg text-xs font-medium bg-accent text-on-accent shadow-xs hover:bg-accent-hover disabled:opacity-50 disabled:pointer-events-none transition-all cursor-pointer active:scale-[0.98]"
+      onClick={onClick}
+      disabled={disabled}
+    >
+      {icon && <Icon name={icon} className="shrink-0 size-4" />}
       {children}
     </button>
   )
@@ -180,7 +281,12 @@ export function PrimaryButton({
 
 export function TextLinkButton({ children, onClick, disabled }: { children: ReactNode; onClick?: () => void; disabled?: boolean }) {
   return (
-    <button type="button" className={BTN_TEXT_LINK} onClick={onClick} disabled={disabled}>
+    <button
+      type="button"
+      className="text-xs font-medium text-accent hover:text-accent-hover disabled:text-ink-faint disabled:pointer-events-none transition-colors cursor-pointer"
+      onClick={onClick}
+      disabled={disabled}
+    >
       {children}
     </button>
   )
@@ -206,37 +312,42 @@ export function SearchBox({
 }) {
   const t = useT()
   return (
-    <>
+    <div className="flex items-center gap-2">
       <div className="relative inline-flex items-center w-64">
+        <Icon name="i-lucide:search" className="absolute left-3 size-4 text-ink-faint pointer-events-none" />
         <input
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && onSubmit()}
           placeholder={placeholder ?? t('common.searchPlaceholder')}
-          className="w-full rounded-md border-0 appearance-none placeholder:text-dimmed focus:outline-none disabled:cursor-not-allowed disabled:opacity-75 transition-colors px-2.5 py-1.5 text-sm gap-1.5 text-highlighted bg-default ring ring-inset ring-accented focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ps-9"
+          className="w-full rounded-lg border border-line bg-surface-muted hover:bg-surface-muted focus:bg-surface text-ink placeholder:text-ink-faint text-xs pl-9 pr-3 py-1.5 transition-all outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 shadow-2xs"
         />
-        <span className="absolute inset-y-0 start-0 flex items-center ps-2.5">
-          <Icon name="i-lucide:search" className="shrink-0 text-dimmed size-5" />
-        </span>
       </div>
       {onFilter && (
         <div className="relative">
-          <button type="button" aria-expanded={filterOpen} className={BTN_PAGER} onClick={onFilter}>
-            <Icon name="i-db-filter-line" className="shrink-0 size-5" />
+          <button
+            type="button"
+            aria-expanded={filterOpen}
+            className={`p-1.5 rounded-lg border border-line bg-surface-muted hover:bg-surface-hover text-ink-secondary transition-colors cursor-pointer shadow-2xs ${
+              filterOpen ? 'bg-accent-soft border-accent/30 text-accent' : ''
+            }`}
+            onClick={onFilter}
+          >
+            <Icon name="i-db-filter-line" className="shrink-0 size-4" />
           </button>
           {filterOpen && filter}
         </div>
       )}
-    </>
+    </div>
   )
 }
 
 export function Tag({ text, tone = 'default' }: { text: string; tone?: Tone }) {
   const cls =
     tone === 'ok'
-      ? 'bg-[#ecfdf5] text-[#047857] border-[#a7f3d0]'
+      ? 'bg-success-soft text-success ring-1 ring-inset ring-success/25'
       : tone === 'warn'
-        ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
-        : 'bg-[#f7f8fb] text-[#475569] border-[#e2e8f0]'
-  return <span className={`inline-flex items-center rounded-[6px] border px-2 py-0.5 text-xs leading-5 ${cls}`}>{text}</span>
+        ? 'bg-warning-soft text-warning ring-1 ring-inset ring-warning/25'
+        : 'bg-surface-hover text-ink-secondary ring-1 ring-inset ring-line-strong/40'
+  return <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium tracking-tight ${cls}`}>{text}</span>
 }

@@ -259,7 +259,7 @@ function seedKnowledgeBases(): Row[] {
   ]
 }
 
-/** 属性树模板。结构是「分组 → 字段 → { value, algorithm_updatable }」 */
+/** 画像模板。结构是「分组 → 字段 → { value, algorithm_updatable }」 */
 function seedTemplates(): Row[] {
   return [
     {

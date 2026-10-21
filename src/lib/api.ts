@@ -1,16 +1,64 @@
 /** 接口封装，权威定义见仓库根目录 openapi.json。换真后端时前端不动。 */
 
 import { API_BASE } from './config'
+import type { TKey } from './i18n'
+import type {
+  ApiKey,
+  DataSource,
+  GraphLink,
+  GraphLinkKind,
+  GraphNode,
+  KnowledgeBase,
+  LogDetail,
+  Memory,
+  MemoryGraph,
+  Meta,
+  ModelRecord,
+  ProfileTemplate,
+  Project,
+  Records,
+  RequestLog,
+  ToolInfo,
+  UsageDailyStat,
+} from '../../shared/contract'
+
+/** 页面照旧从 `lib/api` 取这些类型；定义只有 `shared/contract.ts` 一份 */
+export type {
+  ApiKey,
+  DataSource,
+  GraphLink,
+  GraphLinkKind,
+  GraphNode,
+  KnowledgeBase,
+  LogDetail,
+  Memory,
+  MemoryGraph,
+  Meta,
+  ModelRecord,
+  ProfileTemplate,
+  Project,
+  Records,
+  RequestLog,
+  ToolInfo,
+  UsageDailyStat,
+}
 
 /* ------------------------------------------------------------ 请求层 */
 
 export class ApiError extends Error {
   status: number
   code?: number
-  constructor(message: string, status: number, code?: number) {
+  /** **本地生成**的错误：文案键 + 插值参数，展示时按当前语言取词（见 `errText`）。
+   *
+   *  ⚠️ 上游返回的 message 不带它，那条路原样显示服务端原文，不翻译。
+   *  所以这里的 `message` 只是一句给日志看的英文/技术描述，**不是给用户看的文案**。 */
+  msg?: { key: TKey; args: unknown[] }
+
+  constructor(message: string, status: number, code?: number, msg?: { key: TKey; args: unknown[] }) {
     super(message)
     this.status = status
     this.code = code
+    this.msg = msg
   }
 }
 
@@ -30,124 +78,55 @@ const qs = (params: Record<string, unknown>) => {
 /** 发一次请求并解包。code === 0 返回 data，否则抛 ApiError。 */
 async function call<T>(path: string, opts: CallOpts = {}): Promise<T> {
   const { method = 'POST', body, query } = opts
-  const res = await fetch(`${API_BASE}${path}${query ? qs(query) : ''}`, {
-    method,
-    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}${path}${query ? qs(query) : ''}`, {
+      method,
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  } catch {
+    // 唯一没有 HTTP 状态码的失败路径：BFF 正在重启（Recreate 部署会短暂没有 Pod）、
+    // DNS 解析失败、连接被重置。用 status=0 标出来，`useAsync` 据此重试。
+    // 其它错误都走下面的 HTTP 分支，带着真实状态码。
+    throw new ApiError('network error', 0, undefined, { key: 'error.network', args: [] })
+  }
 
   const text = await res.text()
   let parsed: unknown
   try {
     parsed = text ? JSON.parse(text) : null
   } catch {
-    throw new ApiError(`响应不是 JSON（HTTP ${res.status}）`, res.status)
+    throw new ApiError(`HTTP ${res.status}: response is not JSON`, res.status, undefined, {
+      key: 'error.notJson',
+      args: [res.status],
+    })
   }
 
   const env = parsed as { code?: number; data?: unknown; message?: string } | null
-  if (!res.ok) throw new ApiError(env?.message || `请求失败（HTTP ${res.status}）`, res.status, env?.code)
+  // 上游给了 message 就用它（服务端原文，不翻译）；没给才回落到本地文案
+  if (!res.ok) {
+    throw new ApiError(
+      env?.message || `HTTP ${res.status}`,
+      res.status,
+      env?.code,
+      env?.message ? undefined : { key: 'error.requestFailed', args: [res.status] },
+    )
+  }
   if (env && typeof env.code === 'number' && env.code !== 0) {
-    throw new ApiError(env.message || `接口返回 code=${env.code}`, res.status, env.code)
+    throw new ApiError(
+      env.message || `code=${env.code}`,
+      res.status,
+      env.code,
+      env.message ? undefined : { key: 'error.code', args: [env.code] },
+    )
   }
   return (env && 'data' in env ? env.data : parsed) as T
 }
 
 /* -------------------------------------------------------------- 类型 */
 
-/** 几乎所有接口都要它的 id */
-export interface Project {
-  id: string
-  name: string
-  description?: string
-  /** "ENABLED" 的那条是当前项目 */
-  status?: string
-  createTime?: string
-  isMultiView?: number
-}
-
-export interface ApiKey {
-  id: string
-  keyName: string
-  /** 完整密钥，列表里也下发；展示时前端自己截断 */
-  apiKey: string
-  createTime: string
-}
-
-/** 调用日志行 */
-export interface RequestLog {
-  id: string
-  createTime: string
-  /** 事件类型，见 EVENT_TYPES；extractMemoryDirect 展示成 extractMemory */
-  eventType: string
-  userIds?: string[]
-  agentIds?: string[]
-  status: string
-  duration?: number
-}
-
-/** 调用日志详情。requestBody / responseBody 是 JSON 字符串，前端要二次 parse */
-export interface LogDetail extends Omit<RequestLog, 'userIds' | 'agentIds'> {
-  traceId?: string
-  userId?: string
-  agentId?: string
-  requestTokens?: number
-  responseTokens?: number
-  requestCode?: number
-  responseCode?: number
-  requestBody?: string
-  responseBody?: string
-}
-
-export interface Memory {
-  memoryId: string
-  memoryContent: string
-  /** user | agent | public */
-  subjectType: string
-  externalUserId: string
-  createTime: string
-  /** skill_mem 专有 */
-  skillName?: string
-  skillUrl?: string
-  /** profile_mem 专有 */
-  profileTemplateId?: string
-  profileInstanceId?: string
-}
-
-export interface KnowledgeBase {
-  kbId: string
-  knowledgebaseName: string
-  knowledgebaseDescription?: string
-  projectIds?: string[]
-}
-
-/** 属性树模板。字段结构是「分组 → 字段 → { value, algorithm_updatable }」 */
-export interface ProfileTemplate {
-  templateId: string
-  templateName: string
-  bindingCount?: number
-  updatedAt?: string
-  [k: string]: unknown
-}
-
-export interface UsageDailyStat {
-  date: string
-  addMessage?: { calls?: number; totalTokens?: number }
-  searchMemory?: { calls?: number; totalTokens?: number }
-  chat?: { requestTokens?: number; responseTokens?: number; totalTokens?: number }
-  extractMemory?: { requestTokens?: number; responseTokens?: number; totalTokens?: number }
-  rerank?: { requestTokens?: number; totalTokens?: number }
-}
-
-/* ------------------------------------------------ 各接口的返回形状 */
-
-export interface Records<T> {
-  records: T[]
-  total: number
-  current?: number
-  size?: number
-}
-
-/* ------------------------------------------------------------ 接口 */
+/* 传输形状在 `shared/contract.ts`，这里只留**页面查询参数**。 */
 
 /** 调用日志的事件类型。列表页筛选下拉是前 10 个；后 4 个只出现在详情页的字段表里 */
 export const EVENT_TYPES = [
@@ -161,15 +140,6 @@ export const EVENT_TYPES = [
   'bindProfileTemplate',
   'editProfile',
   'deleteProfile',
-] as const
-
-/** 记忆列表标签；Memories.tsx 另加了 profile_mem */
-export const MEMORY_DETAIL_TYPES = [
-  { type: 'text_mem', label: '事实记忆' },
-  { type: 'pref_mem', label: '偏好记忆' },
-  { type: 'event_mem', label: '事件记忆' },
-  { type: 'skill_mem', label: '技能' },
-  { type: 'tool_mem', label: '工具记忆' },
 ] as const
 
 export interface MemoryListQuery {
@@ -256,7 +226,7 @@ export const api = {
       call<Records<Memory>>('/api/dashboard/knowledgebase/memory/list', { body: { knowledgeBaseId, pageNum, pageSize } }),
   },
 
-  /** 属性树模板。注意这个接口的列表键是 list，不是 records */
+  /** 画像模板。注意这个接口的列表键是 list，不是 records */
   profileTemplate: {
     list: (pageNum = 1, pageSize = 10, projectId = '') =>
       call<{ list: ProfileTemplate[]; total: number; current: number; size: number; pages: number }>(
@@ -303,24 +273,22 @@ export const api = {
 
   /* -------------------------------------------- 以下是本控制台的扩展 */
 
+  /** 记忆星座图。**GET**：只读视图，参数放 query，浏览器能直接点开、能 curl 重放排障。
+   *  它不是 openapi.json 里的接口，是展示层自己加的。 */
+  graph: {
+    memories: (q: { tenant?: string; types?: string; limit?: number }) =>
+      call<MemoryGraph>('/api/dashboard/graph/memories', { method: 'GET', query: q }),
+    /** 单条记忆的**全文**（抽屉里的「展开全文」）。与节点同源，都来自图库——
+     *  洞察记忆在上游 REST 里查不到（`get_memory` 回 not found），所以不能走那条。 */
+    memory: (id: string, tenant?: string) =>
+      call<{ id: string; memory: string }>('/api/dashboard/graph/memory', { method: 'GET', query: { id, tenant } }),
+  },
+
+  /** 模型清单。读的是**上游 Pod 真正在读的那份 ConfigMap**，不是前端的静态副本——
+   *  之前那页读 `public/tech-config/*.json`，模型名是编的（用户 2026-10-19 看出来了）。 */
+  models: {
+    list: () => call<{ records: ModelRecord[] }>('/api/dashboard/models', { method: 'GET' }),
+  },
+
   meta: () => call<Meta>('/api/meta', { method: 'GET' }),
-}
-
-/* ------------------------------------------------- 扩展接口的类型 */
-
-export type DataSource = 'live' | 'sample'
-
-/** 接入说明与示例命令据此生成 */
-export interface ToolInfo {
-  name: string
-  title: string
-}
-
-export interface Meta {
-  mode: DataSource
-  service: string
-  health: Record<string, unknown> | null
-  /** 密钥前缀，新建密钥的展示与校验用它 */
-  keyPrefix: string
-  tools: ToolInfo[]
 }

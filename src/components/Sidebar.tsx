@@ -3,18 +3,17 @@ import { Link, useLocation } from 'react-router-dom'
 import { Logo } from './Logo'
 import { Icon } from './Icon'
 import { NAV_GROUPS } from '../lib/nav'
-import { BTN_FOLD, BTN_PROJECT, NAV_ITEM, NAV_LINK } from '../lib/cls'
-import { useProject, useStr, useT } from '../lib/store'
+import { useLang, useMeta, useProject, useStr, useT } from '../lib/store'
+import { useTheme, type ThemePref } from '../lib/theme'
 import { LINKS } from '../lib/config'
 import type { TKey } from '../lib/i18n'
 
 /** 侧栏组件的作用域属性，组件级 CSS 依赖它命中 */
 const S = { 'data-v-bc08aa60': '' } as const
-const P = { 'data-v-ede8bedc': '' } as const
 const U = { 'data-v-4079c7a3': '' } as const
 
 const COLLAPSE_KEY = 'console.sidebar.collapsed'
-const W_EXPANDED = 200
+const W_EXPANDED = 220
 const W_COLLAPSED = 68
 const RAIL_ITEM = 44
 
@@ -23,13 +22,20 @@ export function Sidebar() {
   const t = useT()
   const str = useStr()
   const { currentProjectId, currentProjectName, projects, setCurrent } = useProject()
+  const { canLogout } = useMeta()
+  const { lang, setLang } = useLang()
+  const { pref: themePref, setPref: setThemePref } = useTheme()
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === '1')
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [accountOpen, setAccountOpen] = useState(false)
   const pickerRef = useRef<HTMLDivElement>(null)
+  const accountRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) setPickerOpen(false)
+      const node = e.target as Node
+      if (pickerRef.current && !pickerRef.current.contains(node)) setPickerOpen(false)
+      if (accountRef.current && !accountRef.current.contains(node)) setAccountOpen(false)
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
@@ -49,50 +55,57 @@ export function Sidebar() {
     <div
       {...S}
       style={{ width: collapsed ? W_COLLAPSED : W_EXPANDED }}
-      className={`flex flex-col h-screen min-h-0 shrink-0 bg-[#f0f2f5] transition-all duration-300 overflow-hidden ${
-        collapsed ? 'px-0 items-center' : 'px-4'
+      className={`flex flex-col h-screen min-h-0 shrink-0 bg-surface-muted/80 border-r border-line transition-all duration-300 overflow-hidden ${
+        collapsed ? 'px-0 items-center' : 'px-3'
       }`}
     >
-      <div {...S} className={`h-14 shrink-0 flex items-center ${collapsed ? 'justify-center' : ''}`}>
-        <a {...S} href={LINKS.home} rel="noopener noreferrer" target="_blank">
+      <div {...S} className={`h-14 shrink-0 flex items-center ${collapsed ? 'justify-center' : 'px-1'}`}>
+        <a {...S} href={LINKS.home} rel="noopener noreferrer" target="_blank" className="flex items-center">
           <Logo compact={collapsed} />
         </a>
       </div>
 
-      <div {...S} className={`w-full shrink-0 mt-5 relative ${collapsed ? 'flex justify-center' : ''}`} ref={pickerRef}>
+      <div {...S} className={`w-full shrink-0 mt-3 relative ${collapsed ? 'flex justify-center' : ''}`} ref={pickerRef}>
         {collapsed ? (
           <button
             type="button"
             title={currentName}
             onClick={() => setPickerOpen((o) => !o)}
-            style={{ width: RAIL_ITEM, height: 38 }}
-            className="rounded-[8px] border border-[#CBD5E1] bg-transparent flex items-center justify-center cursor-pointer hover:bg-white"
+            style={{ width: RAIL_ITEM, height: 40 }}
+            className="rounded-lg border border-line bg-surface hover:bg-surface-hover/80 flex items-center justify-center cursor-pointer text-ink-secondary transition-colors shadow-2xs"
           >
-            <span className="iconify i-db:arrow-right-left text-third-gray size-5" aria-hidden="true" />
+            <span className="iconify i-db:arrow-right-left size-4" aria-hidden="true" />
           </button>
         ) : (
-          <button type="button" className={BTN_PROJECT} onClick={() => setPickerOpen((o) => !o)}>
-            <span {...P} className="truncate text-left">
-              {currentName}
-            </span>
-            <span {...P} className="absolute top-0 right-2.5 bottom-0 flex items-center flex">
-              <span {...P} className="iconify i-db:arrow-right-left text-third-gray size-5" aria-hidden="true" />
-            </span>
+          <button
+            type="button"
+            onClick={() => setPickerOpen((o) => !o)}
+            className="w-full flex items-center justify-between gap-2 h-10 px-3 rounded-lg border border-line bg-surface hover:bg-surface-muted text-ink transition-all cursor-pointer shadow-2xs text-left"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="size-5.5 rounded-md bg-accent-soft border border-accent/30 text-accent text-xs font-semibold flex items-center justify-center shrink-0">
+                {currentName.charAt(0).toUpperCase()}
+              </span>
+              <span className="truncate text-sm font-medium text-ink">{currentName}</span>
+            </div>
+            <Icon name="i-lucide:chevrons-up-down" className="size-4 text-ink-faint shrink-0" />
           </button>
         )}
 
         {pickerOpen && (
           <div
-            className="absolute z-50 mt-1 rounded-[8px] border border-[#E2E8F0] bg-white shadow-lg py-1"
-            style={collapsed ? { left: 0, top: '100%', width: 200 } : { left: 0, right: 0, top: '100%' }}
+            className="absolute z-50 mt-1 rounded-xl border border-line bg-surface shadow-lg p-1.5 backdrop-blur-md"
+            style={collapsed ? { left: 0, top: '100%', width: 220 } : { left: 0, right: 0, top: '100%' }}
           >
-            {projects.length === 0 && <div className="px-3 py-2 text-sm text-[#94a3b8]">{t('nav.noProject')}</div>}
+            {projects.length === 0 && <div className="px-3 py-2 text-sm text-ink-faint">{t('nav.noProject')}</div>}
             {projects.map((p) => (
               <button
                 key={p.id}
                 type="button"
-                className={`w-full text-left px-3 py-2 text-sm hover:bg-[#f7f8fb] flex items-center justify-between ${
-                  currentProjectId === p.id ? 'text-primary' : 'text-[#314158]'
+                className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors flex items-center justify-between ${
+                  currentProjectId === p.id
+                    ? 'bg-accent-soft text-accent font-medium'
+                    : 'text-ink-secondary hover:bg-surface-hover hover:text-ink'
                 }`}
                 onClick={() => {
                   setCurrent(p.id).catch(() => {})
@@ -100,7 +113,7 @@ export function Sidebar() {
                 }}
               >
                 <span className="truncate">{p.name}</span>
-                {currentProjectId === p.id && <Icon name="i-lucide:check" className="ml-2 size-4 shrink-0" />}
+                {currentProjectId === p.id && <Icon name="i-lucide:check" className="ml-2 size-4 shrink-0 text-accent" />}
               </button>
             ))}
           </div>
@@ -109,33 +122,58 @@ export function Sidebar() {
 
       <div
         {...S}
-        className={`dashboard-aside-scroll w-full flex-1 min-h-0 mt-3 space-y-3 overflow-y-auto overflow-x-hidden ${
+        className={`dashboard-aside-scroll w-full flex-1 min-h-0 mt-3 space-y-4 overflow-y-auto overflow-x-hidden ${
           collapsed ? 'flex flex-col items-center' : ''
         }`}
       >
-        <div {...S} className={`space-y-3 ${collapsed ? 'flex flex-col items-center' : 'w-full'}`}>
+        <div {...S} className={`space-y-4 ${collapsed ? 'flex flex-col items-center' : 'w-full'}`}>
           {NAV_GROUPS.map((group) => (
             <div key={group.title} className={`space-y-1 ${collapsed ? 'flex flex-col items-center' : 'w-full'}`}>
-              {!collapsed && <div className="px-2 pb-1 text-xs leading-5 text-third-gray/70">{str(group.title as TKey)}</div>}
-              <ul className={`space-y-1.5 ${collapsed ? 'flex flex-col items-center' : ''}`}>
+              {!collapsed && (
+                <div className="px-2.5 pb-1 text-[11px] font-semibold tracking-wider uppercase text-ink-faint">
+                  {str(group.title as TKey)}
+                </div>
+              )}
+              <ul className={`space-y-0.5 ${collapsed ? 'flex flex-col items-center' : ''}`}>
                 {group.items.map((item) => {
                   const active = pathname === item.to
+                  /* 还没开放的页（`ComingSoon`）：保持原样显示但置灰不可点击 */
+                  const off = item.disabled === true
                   return (
                     <li
                       key={item.to}
                       title={str(item.label as TKey)}
                       style={collapsed ? { width: RAIL_ITEM } : undefined}
-                      className={`${NAV_ITEM} ${active ? 'bg-white text-primary' : 'text-third-gray hover:bg-white hover:text-primary'}`}
+                      className={`group rounded-lg border transition-colors duration-150 ${
+                        off
+                          ? 'border-transparent opacity-40 cursor-not-allowed'
+                          : active
+                            ? 'bg-accent-soft text-ink font-semibold shadow-2xs border-accent/25'
+                            : 'border-transparent text-ink-secondary hover:bg-surface-hover hover:text-ink'
+                      }`}
                     >
-                      <Link to={item.to} className={`${NAV_LINK} ${collapsed ? 'justify-center px-0' : ''}`}>
+                      <Link
+                        to={item.to}
+                        aria-disabled={off || undefined}
+                        tabIndex={off ? -1 : undefined}
+                        onClick={off ? (e) => e.preventDefault() : undefined}
+                        className={`flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium w-full rounded-lg transition-colors ${
+                          collapsed ? 'justify-center px-0' : ''
+                        } ${off ? 'cursor-not-allowed' : ''}`}
+                      >
                         {item.img ? (
-                          <div className="w-4 h-4 flex items-center justify-center shrink-0">
-                            <img src={item.img} className="w-full h-full object-contain" alt="" />
+                          <div className="size-4.5 flex items-center justify-center shrink-0">
+                            <img src={item.img} className="size-full object-contain" alt="" />
                           </div>
                         ) : (
-                          <Icon name={active && item.iconActive ? item.iconActive : item.icon!} className="w-4 h-4" />
+                          <Icon
+                            name={active && item.iconActive ? item.iconActive : item.icon!}
+                            className={`size-4.5 shrink-0 transition-colors ${
+                              active ? 'text-accent' : 'text-ink-muted group-hover:text-ink'
+                            }`}
+                          />
                         )}
-                        {!collapsed && <span className="text-[14px] leading-6">{str(item.label as TKey)}</span>}
+                        {!collapsed && <span className="truncate">{str(item.label as TKey)}</span>}
                       </Link>
                     </li>
                   )
@@ -150,76 +188,129 @@ export function Sidebar() {
         <button
           type="button"
           title={t('nav.collapse')}
-          className={`${BTN_FOLD} ${collapsed ? 'justify-center px-0' : ''}`}
+          className={`flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-sm font-medium text-ink-muted hover:text-ink hover:bg-surface-hover transition-colors cursor-pointer ${
+            collapsed ? 'justify-center px-0' : ''
+          }`}
           style={collapsed ? { width: RAIL_ITEM } : undefined}
           onClick={toggleCollapse}
         >
-          <Icon name="i-ll-fold" className="size-4 text-ink" />
-          {!collapsed && <span className="w-[30px] text-sm font-normal color-[#62748E] ml-0.5 whitespace-nowrap">{t('nav.collapse')}</span>}
+          <Icon name="i-ll-fold" className="size-4.5 shrink-0 text-ink-muted" />
+          {!collapsed && <span className="truncate text-ink-secondary">{t('nav.collapse')}</span>}
         </button>
 
-        <ul {...S} className="space-y-1.5">
-          <li
+        {/* ⚠️ 收起态必须 `mx-auto`：外层是 `w-full`，链接本身只有 44px 宽，
+            不加的话它贴在左边，图标中心落在 22px，而上面的导航图标在 33.5px（侧栏中线）。 */}
+        <div className="w-full mt-1">
+          <Link
+            to={LINKS.docs}
             title={t('nav.docs')}
             style={collapsed ? { width: RAIL_ITEM } : undefined}
-            className={`${NAV_ITEM} text-third-gray hover:bg-white hover:text-primary`}
+            className={`flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm font-medium text-ink-muted hover:text-ink hover:bg-surface-hover transition-colors ${
+              collapsed ? 'justify-center px-0 mx-auto' : ''
+            }`}
           >
-            <Link to={LINKS.docs} className={`${NAV_LINK} ${collapsed ? 'justify-center px-0' : ''}`}>
-              <Icon name="i-db-book" className="w-4 h-4" />
-              {!collapsed && <span className="text-[14px] leading-6">{t('nav.docs')}</span>}
-            </Link>
-          </li>
-        </ul>
+            <Icon name="i-db-book" className="size-4.5 shrink-0 text-ink-muted" />
+            {!collapsed && <span className="truncate">{t('nav.docs')}</span>}
+          </Link>
+        </div>
 
-        <Link
-          {...S}
-          to="/cn/usage"
-          title={t('nav.freePlan')}
-          style={{
-            width: collapsed ? RAIL_ITEM : undefined,
-            background: 'rgba(98, 116, 142, 0.06)',
-            borderImage: 'linear-gradient(90deg, rgba(171, 187, 205, 0.3) 0%, rgba(98, 116, 142, 0.3) 99%) 1 / 1 / 0 stretch',
-            color: 'rgb(98, 116, 142)',
-          }}
-          className={`rounded-[8px] font-medium group flex items-center whitespace-nowrap py-2.5 text-[14px] gap-x-1 h-11 mb-2 ${
-            collapsed ? 'justify-center px-0' : 'px-2'
-          }`}
-        >
-          <div className="flex items-center justify-center shrink-0">
-            <Icon
-              name="i-ri:money-cny-circle-line"
-              style={{
-                fontSize: '16px',
-                background: 'linear-gradient(311deg, rgb(98, 116, 142) 13%, rgb(222, 228, 235) 106%)',
-              }}
-            />
-          </div>
-          {!collapsed && <span className="whitespace-nowrap overflow-hidden">{t('nav.freePlan')}</span>}
-        </Link>
-
-        <Link
-          {...U}
-          to={LINKS.about}
-          title={t('nav.account')}
-          style={{ width: collapsed ? RAIL_ITEM : undefined }}
-          className={`border-t-[1px] border-[#E2E8F0] flex items-center cursor-pointer gap-[8px] ${
-            collapsed ? 'justify-center py-3' : 'pt-4 pb-6 px-2 justify-between'
-          }`}
-        >
-          <div
+        {/* 账号菜单 */}
+        <div {...U} ref={accountRef} className="relative mt-2 pt-2 border-t border-line w-full">
+          <button
             {...U}
-            className="rounded-full w-[36px] h-[36px] my-[3px] flex items-center justify-center text-letter shrink-0 text-white"
-            style={{ backgroundColor: 'rgb(134, 137, 244)' }}
+            type="button"
+            title={t('nav.account')}
+            aria-expanded={accountOpen}
+            onClick={() => setAccountOpen((o) => !o)}
+            style={{ width: collapsed ? RAIL_ITEM : undefined }}
+            className={`flex items-center cursor-pointer gap-2.5 w-full rounded-lg p-2 transition-colors hover:bg-surface-hover ${
+              collapsed ? 'justify-center mx-auto' : 'justify-between'
+            }`}
           >
-            G
-          </div>
-          {!collapsed && (
-            <div {...U} className="truncate text-[14px] font-400 leading-[20px] text-[#606266]">
-              {t('nav.account')}
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="rounded-full size-7 bg-line text-ink-secondary font-semibold text-xs flex items-center justify-center shrink-0 border border-line-strong">
+                G
+              </div>
+              {!collapsed && <div className="truncate text-sm font-medium text-ink-secondary text-left">{t('nav.account')}</div>}
+            </div>
+            {!collapsed && (
+              <Icon
+                name="i-lucide:chevron-up"
+                className={`size-4 text-ink-faint shrink-0 transition-transform ${accountOpen ? 'rotate-180' : ''}`}
+              />
+            )}
+          </button>
+
+          {accountOpen && (
+            <div
+              {...U}
+              className="absolute z-50 bottom-full mb-1.5 rounded-xl border border-line bg-surface shadow-lg p-1.5 backdrop-blur-md"
+              style={collapsed ? { left: '100%', bottom: 0, marginLeft: 8, width: 160 } : { left: 0, right: 0 }}
+            >
+              <Link
+                {...U}
+                to={LINKS.about}
+                className="w-full text-left px-3 py-2 text-sm text-ink-secondary hover:bg-surface-hover hover:text-ink rounded-lg transition-colors block"
+                onClick={() => setAccountOpen(false)}
+              >
+                {t('nav.about')}
+              </Link>
+              <button
+                {...U}
+                type="button"
+                className="w-full text-left px-3 py-2 text-sm text-ink-secondary hover:bg-surface-hover hover:text-ink rounded-lg transition-colors flex items-center justify-between"
+                onClick={() => {
+                  setLang(lang === 'zh' ? 'en' : 'zh')
+                  setAccountOpen(false)
+                }}
+              >
+                <span>{t(lang === 'zh' ? 'lang.en' : 'lang.zh')}</span>
+                <span className="text-xs text-ink-faint font-mono uppercase">{lang === 'zh' ? 'EN' : 'ZH'}</span>
+              </button>
+
+              {/* 外观：三档分段控件。用 title 而不是可见文字——侧栏收起时也要能操作，
+                  而展开态下三个图标已经能看懂了。 */}
+              <div {...U} className="px-3 pt-2 pb-2.5 border-t border-line mt-1">
+                <div className="text-[11px] font-medium tracking-wider uppercase text-ink-faint mb-1.5">{t('theme.label')}</div>
+                <div className="grid grid-cols-3 gap-0.5 rounded-lg bg-surface-hover/80 p-0.5 border border-line">
+                  {(
+                    [
+                      ['light', 'i-lucide:sun'],
+                      ['dark', 'i-lucide:moon'],
+                      ['system', 'i-lucide:monitor'],
+                    ] as [ThemePref, string][]
+                  ).map(([key, icon]) => (
+                    <button
+                      key={key}
+                      {...U}
+                      type="button"
+                      title={str(`theme.${key}` as TKey)}
+                      aria-pressed={themePref === key}
+                      className={`flex items-center justify-center h-6.5 rounded-md transition-all cursor-pointer ${
+                        themePref === key ? 'bg-surface text-ink shadow-2xs' : 'text-ink-muted hover:text-ink'
+                      }`}
+                      onClick={() => setThemePref(key)}
+                    >
+                      <Icon name={icon} className="size-3.5" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {canLogout && (
+                <button
+                  {...U}
+                  type="button"
+                  className="w-full text-left px-3 py-2 text-sm text-danger hover:bg-danger-soft rounded-lg transition-colors border-t border-line mt-1 pt-2 block"
+                  onClick={() => {
+                    window.location.assign('/__logout')
+                  }}
+                >
+                  {t('nav.logout')}
+                </button>
+              )}
             </div>
           )}
-          {!collapsed && <img {...U} src="/icons/user-arrow.svg" className="w-[16px] h-[16px]" alt="" />}
-        </Link>
+        </div>
       </div>
     </div>
   )

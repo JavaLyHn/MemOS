@@ -1,20 +1,23 @@
-import { api } from '../lib/api'
-import { useAsync } from '../lib/useAsync'
-import { useT, useProject } from '../lib/store'
+import { useT } from '../lib/store'
 import { LINKS } from '../lib/config'
 import { Panel, PageHeader, PrimaryButton } from '../components/ui'
 import { buildMcpConfig } from '../lib/quickstart-data'
 
 function Row({ label, value, href }: { label: string; value: string; href?: string }) {
   return (
-    <div className="flex items-center gap-3 py-2 border-b border-[#f1f5f9] last:border-0">
-      <span className="w-40 shrink-0 text-sm text-[#62748E]">{label}</span>
+    <div className="flex items-center gap-3 py-3 border-b border-line last:border-0">
+      <span className="w-40 shrink-0 text-xs font-medium text-ink-muted">{label}</span>
       {href ? (
-        <a href={href} target="_blank" rel="noopener noreferrer" className="text-sm text-[#4044ed] hover:underline break-all">
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs font-medium text-accent hover:text-accent-hover hover:underline break-all inline-flex items-center gap-1"
+        >
           {value}
         </a>
       ) : (
-        <code className="text-xs font-mono break-all text-[#18181b]">{value}</code>
+        <code className="text-xs font-mono break-all text-ink bg-surface-hover px-1.5 py-0.5 rounded border border-line">{value}</code>
       )}
     </div>
   )
@@ -22,13 +25,6 @@ function Row({ label, value, href }: { label: string; value: string; href?: stri
 
 export function Docs() {
   const t = useT()
-  const { currentProjectId } = useProject()
-  const { data } = useAsync(
-    () => (currentProjectId ? api.keys.list(currentProjectId, 1, 1) : Promise.resolve({ records: [], total: 0 })),
-    [currentProjectId],
-  )
-  const key = data?.records[0]?.apiKey ?? 'YOUR_API_KEY'
-
   return (
     <>
       <PageHeader
@@ -41,18 +37,21 @@ export function Docs() {
         }
       />
 
-      <div className="flex flex-col gap-4">
+      {/* ⚠️ 必须 `flex-1 min-h-0` + 末块 `flex-1`：内容区是 `flex flex-col`，
+          不加的话这两块按内容高度排完就停，窗口一高页面下半截整片空着
+          （2026-10-19 全页面巡检量到 1080 高的窗口下留白 527px）。 */}
+      <div className="flex flex-col gap-4 flex-1 min-h-0">
         <Panel className="px-5 py-2">
           <Row label={t('docs.endpoint')} value={LINKS.home} href={LINKS.home} />
           <Row label={t('docs.mcp')} value={LINKS.mcp} />
           <Row label={t('docs.health')} value={LINKS.health} href={LINKS.health} />
         </Panel>
 
-        <Panel className="px-5 py-4">
-          <h3 className="text-sm font-semibold text-[#18181b] mb-2">{t('docs.guide')}</h3>
-          <p className="text-sm text-[#62748E] mb-3">{t('quickstart.card.agentDesc')}</p>
-          <pre className="rounded-[8px] border border-[#dde5f0] bg-[#fbfcfe] p-3 text-xs font-mono overflow-auto">
-            {buildMcpConfig(key)}
+        <Panel className="flex-1 min-h-0 px-5 py-4">
+          <h3 className="text-sm font-semibold text-ink mb-1">{t('docs.guide')}</h3>
+          <p className="text-xs text-ink-muted mb-3">{t('docs.mcpHint')}</p>
+          <pre className="rounded-xl border border-line bg-surface-muted p-4 text-xs font-mono overflow-auto text-ink leading-relaxed">
+            {buildMcpConfig()}
           </pre>
         </Panel>
       </div>

@@ -35,6 +35,10 @@ export function ListPage<T>({
   panelClassName,
   /** 除翻页与搜索外还要触发重新取数的东西（当前项目、标签页、筛选条件等） */
   deps = [],
+  /** 取数条件还没就绪时置真：不请求、停在「加载中」。
+   *  典型场景是项目字典还没回来——那时 `deps` 里的 `currentProjectId` 还是空串，
+   *  请求会被 BFF 拒（`40000 未知项目：(空)`），页面先闪一段报错再打第二遍。 */
+  skip = false,
 }: {
   title: string
   desc?: string
@@ -48,10 +52,11 @@ export function ListPage<T>({
   filter?: (close: () => void) => ReactNode
   searchPlaceholder?: string
   deps?: unknown[]
+  skip?: boolean
 }) {
   const pg = usePaged(10)
   const [filterOpen, setFilterOpen] = useState(false)
-  const { data, state, error } = useAsync(() => load(pg.page, pg.pageSize, pg.q), [pg.page, pg.pageSize, pg.q, ...deps])
+  const { data, state, error } = useAsync(() => load(pg.page, pg.pageSize, pg.q), [pg.page, pg.pageSize, pg.q, ...deps], { skip })
 
   return (
     <>
@@ -76,10 +81,10 @@ export function ListPage<T>({
         }
       />
 
-      <div className="flex flex-col flex-1 space-y-4 h-full">
+      <div className="flex min-h-0 flex-1 flex-col gap-4">
         <div className="flex-1">
-          <div className="h-full flex flex-col justify-between">
-            <Panel className={panelClassName ?? ''}>
+          <div className="flex h-full min-h-0 flex-col gap-3">
+            <Panel className={`flex-1 min-h-0 ${panelClassName ?? ''}`}>
               <Table
                 head={
                   <>

@@ -6,6 +6,12 @@ export interface NavItem {
   iconActive?: string
   /** 少数条目用的是位图而不是图标字体 */
   img?: string
+  /** 该页还没开放（页面本身渲染 `ComingSoon`）。渲染成**置灰、不可点**的条目。
+   *
+   *  ⚠️ 加了这个标记的条目**仍然是链接**，只是点了不导航（见 Sidebar）——
+   *  不用 `<span>` 代替 `<Link>`：同一条导航项在普通/当前两种状态下必须是同一个元素，
+   *  否则侧栏的布局与图标选中态会跟着变。 */
+  disabled?: boolean
 }
 
 export interface NavGroup {
@@ -25,26 +31,22 @@ export const NAV_GROUPS: NavGroup[] = [
     title: 'group.资源',
     items: [
       { label: 'nav.requests', to: '/cn/requests', icon: 'i-db-log', iconActive: 'i-db-log-fill' },
-      { label: 'nav.knowledgeBase', to: '/cn/knowledgeBase', icon: 'i-db-knowledge-base' },
+      { label: 'nav.knowledgeBase', to: '/cn/knowledgeBase', icon: 'i-db-knowledge-base', disabled: true },
       { label: 'nav.memoryList', to: '/cn/memoryList', img: '/icons/memory-list.svg' },
+      { label: 'nav.memoryGraph', to: '/cn/memoryGraph', icon: 'i-db-graph' },
       { label: 'nav.models', to: '/cn/models', icon: 'i-db-model', iconActive: 'i-db-model-fill' },
     ],
   },
   {
     title: 'group.设置',
     items: [
-      { label: 'nav.profileTemplate', to: '/cn/profileTemplate', icon: 'i-db-project', iconActive: 'i-db-project-fill' },
+      { label: 'nav.profileTemplate', to: '/cn/profileTemplate', icon: 'i-db-project', iconActive: 'i-db-project-fill', disabled: true },
       { label: 'nav.customExtraction', to: '/cn/customExtraction', icon: 'i-db-skill', iconActive: 'i-db-skill-fill' },
       { label: 'nav.usage', to: '/cn/usage', icon: 'i-db-chart' },
     ],
   },
 ]
 
-/** 路径 → 面包屑文案 */
-export const PAGE_TITLES: Record<string, string> = Object.fromEntries(NAV_GROUPS.flatMap((g) => g.items.map((i) => [i.to, i.label])))
-
-/** 属性树模板的新建 / 详情是子路由，先按前缀兜一层再退回精确匹配 */
-export function pageTitleKey(pathname: string): string | undefined {
-  if (pathname.startsWith('/cn/profileTemplate/')) return 'profile.detail.title'
-  return PAGE_TITLES[pathname]
-}
+/* 这里原来还有 `PAGE_TITLES` 与 `pageTitleKey()`，是给顶栏的面包屑用的。
+ * 2026-10-19 顶栏整体去掉（用户要求），这两个导出一起删掉——留着就是没人引用的死代码，
+ * 而它们指向的 `nav.*` 键会被字典校验判成「死文案」，反而掩盖真正的问题。 */

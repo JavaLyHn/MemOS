@@ -2,13 +2,11 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Icon } from '../components/Icon'
 import { AccessMethodHint } from '../components/AccessMethodHint'
-import { api } from '../lib/api'
-import { useAsync } from '../lib/useAsync'
-import { useLang, useT, useToast, useMeta, useProject } from '../lib/store'
-import { buildTabs, tabLabel, type Step } from '../lib/quickstart-data'
+import { useLang, useT, useToast, useMeta } from '../lib/store'
+import { copyText } from '../lib/clipboard'
+import { HINT_COPY, buildTabs, tabLabel, type Step } from '../lib/quickstart-data'
 
 const Q = { 'data-v-de9e37d2': '' } as const
-const T = { 'data-v-1bbcdca4': '' } as const
 const S = { 'data-v-82f9e747': '' } as const
 const C = { 'data-v-ce54f47b': '' } as const
 const N = { 'data-v-36c1fd29': '' } as const
@@ -20,9 +18,6 @@ const SUBTAB =
 const SUBTAB_ACTIVE =
   'inline-flex items-center disabled:cursor-not-allowed aria-disabled:cursor-not-allowed disabled:opacity-75 aria-disabled:opacity-75 transition-colors py-1.5 gap-1.5 text-primary bg-primary/10 hover:bg-primary/15 active:bg-primary/15 focus:outline-none focus-visible:bg-primary/15 disabled:bg-primary/10 aria-disabled:bg-primary/10 min-h-9 rounded-lg px-4 text-sm font-medium shadow-none quickstart-subtab'
 
-const PILL_LINK =
-  'inline-flex items-center disabled:cursor-not-allowed aria-disabled:cursor-not-allowed disabled:opacity-75 aria-disabled:opacity-75 transition-colors py-1.5 gap-1.5 focus:outline-none focus-visible:bg-primary/10 disabled:bg-transparent aria-disabled:bg-transparent dark:disabled:bg-transparent dark:aria-disabled:bg-transparent cursor-pointer whitespace-nowrap rounded-md min-h-8 px-2 text-sm font-medium text-primary hover:bg-primary/5 active:bg-primary/5 shadow-none'
-
 const PILL_OUTLINE =
   'rounded-md font-medium inline-flex items-center disabled:cursor-not-allowed aria-disabled:cursor-not-allowed disabled:opacity-75 aria-disabled:opacity-75 transition-colors px-2.5 py-1.5 text-xs gap-1.5 ring ring-inset ring-primary/50 text-primary hover:bg-primary/10 active:bg-primary/10 disabled:bg-transparent aria-disabled:bg-transparent'
 
@@ -31,7 +26,23 @@ const COPY_BTN =
 
 function CodeBlock({ step }: { step: Step }) {
   const t = useT()
+  const { lang } = useLang()
   const toast = useToast()
+  // 「获取 API Key」这类步骤在控制台里有对应页面，渲染成一个跳转按钮：
+  // 放一段代码（哪怕是占位符）也帮不上忙，人需要的是那把钥匙本身。
+  if (step.link) {
+    return (
+      <div {...S} className="setup-timeline-step__code-shell rounded-lg overflow-hidden" style={{ border: '1px solid rgb(226, 232, 240)' }}>
+        <div {...S} className="code-area">
+          <div {...S} className="code-area__body items-center">
+            <Link to={step.link.to} className="api-key-code text-primary hover:underline">
+              {step.link.label[lang]}
+            </Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
   return (
     <div {...S} className="setup-timeline-step__code-shell rounded-lg overflow-hidden" style={{ border: '1px solid rgb(226, 232, 240)' }}>
       <div {...S} className={`code-area${step.multiline ? ' code-area--multiline' : ''}`}>
@@ -53,10 +64,10 @@ function CodeBlock({ step }: { step: Step }) {
             className={COPY_BTN}
             onClick={async () => {
               try {
-                await navigator.clipboard.writeText(step.code)
+                await copyText(step.code)
                 toast(t('common.copied'))
               } catch {
-                toast(t('common.failed'), 'err')
+                toast(t('common.copyFailed'), 'err')
               }
             }}
           >
@@ -95,13 +106,13 @@ function TimelineStep({ step, lang }: { step: Step; lang: 'zh' | 'en' }) {
           aria-describedby={step.desc ? descId : undefined}
           onClick={() => setCollapsed((c) => !c)}
         >
-          <h3 {...S} className="step-fold-title text-sm font-semibold text-gray-900 mb-0 min-w-0 text-left">
+          <h3 {...S} className="step-fold-title text-sm font-semibold text-ink mb-0 min-w-0 text-left">
             {step.title[lang]}
           </h3>
           <Icon {...S} name={collapsed ? 'i-lucide:chevron-down' : 'i-lucide:chevron-up'} className="step-fold-chevron shrink-0" />
         </button>
         {step.desc && (
-          <span {...S} id={descId} className="step-fold-desc text-xs text-[#62748E] leading-relaxed whitespace-pre-line">
+          <span {...S} id={descId} className="step-fold-desc text-xs text-ink-muted leading-relaxed whitespace-pre-line">
             {step.desc[lang]}
           </span>
         )}
@@ -122,27 +133,23 @@ export function QuickStart() {
   const t = useT()
   const { lang } = useLang()
   const toast = useToast()
-  const [card, setCard] = useState<'agent' | 'code'>('agent')
   const [tabId, setTabId] = useState('mcp')
-  const [tipOpen, setTipOpen] = useState(true)
 
-  const { currentProjectId } = useProject()
-  const { data } = useAsync(
-    () => (currentProjectId ? api.keys.list(currentProjectId, 1, 1) : Promise.resolve({ records: [], total: 0 })),
-    [currentProjectId],
-  )
-  const apiKey = data?.records[0]?.apiKey ?? ''
+  // ⚠️ 这里原来会把当前项目的第一把密钥查出来、嵌进所有示例代码里。
+  //    现在示例里只有占位符，页面不需要也不应该拿到任何密钥（见 quickstart-data.ts）。
   const { tools } = useMeta()
 
-  const tabs = useMemo(() => buildTabs(apiKey, { tools }), [apiKey, tools])
-  const visible = tabs.filter((x) => x.card === card)
-  const tab = visible.find((x) => x.id === tabId) ?? visible[0]
+  const tabs = useMemo(() => buildTabs({ tools }), [tools])
+  const tab = tabs.find((x) => x.id === tabId) ?? tabs[0]
 
-  const pickCard = (c: 'agent' | 'code') => {
-    setCard(c)
-    const first = tabs.find((x) => x.card === c)
-    if (first) setTabId(first.id)
-  }
+  /** 「选择哪种接入方式？」浮层里的行。
+   *
+   *  ⚠️ 方式名取自**页签自己的 label**，行数也就是页签数——不在这里另写一份。
+   *  这里原来写死了 `Plugin / CLI + Skill / MCP` 三行，而页签里一个都没有。 */
+  const hintRows = useMemo(
+    () => tabs.map((x) => [tabLabel(x, lang), t(HINT_COPY[x.id].scene), t(HINT_COPY[x.id].feature)] as [string, string, string]),
+    [tabs, lang, t],
+  )
 
   return (
     <>
@@ -150,100 +157,36 @@ export function QuickStart() {
         <div {...Q} className="flex justify-between items-center mb-4">
           <div className="flex items-center gap-2 min-w-0">
             <div className="flex min-w-0 items-end gap-2">
-              <h2 className="text-lg text-[#303133] font-semibold leading-6.25">{t('quickstart.title')}</h2>
-              <p className="text-sm text-[#606266] leading-5.5">{t('quickstart.subtitle')}</p>
+              <h2 className="text-lg text-ink font-semibold leading-6.25">{t('quickstart.title')}</h2>
+              <p className="text-sm text-ink-secondary leading-5.5">{t('quickstart.subtitle')}</p>
             </div>
           </div>
         </div>
 
-        {tipOpen && (
-          <div {...T} {...Q} className="quickstart-tip-bar mb-5">
-            <div {...T} className="quickstart-tip-bar__content">
-              <img {...T} src="/icons/quickstart-tip.svg" className="quickstart-tip-bar__icon" alt="" />
-              <p {...T} className="quickstart-tip-bar__text">
-                {t('quickstart.tip')}
-              </p>
-            </div>
-            <div {...T} className="quickstart-tip-bar__actions">
-              <Link to="/cn/usage" className={PILL_LINK}>
-                {t('quickstart.tipCta')}
-                <Icon name="i-lucide:rocket" className="shrink-0 size-4 w-4 h-4" />
-              </Link>
-              <button
-                {...T}
-                type="button"
-                aria-label={t('quickstart.tipClose')}
-                className="quickstart-tip-bar__close"
-                onClick={() => setTipOpen(false)}
-              >
-                <Icon {...T} name="i-lucide:x" className="quickstart-tip-bar__close-icon" />
-              </button>
-            </div>
-          </div>
-        )}
+        {/* 这里原来有一条「我们向每位开发者赠送百万级免费 token…」的宣传条。
+            2026-10-19 用户要求删掉：它是**宣传**，而且对「百度厂内版」来说根本不存在
+            这回事——写一句做不到的承诺比不写更糟。 */}
 
-        <div {...Q} className="category-cards mb-8">
-          <button
-            {...Q}
-            type="button"
-            className={`pick-card${card === 'agent' ? ' pick-card--selected' : ''}`}
-            onClick={() => pickCard('agent')}
-          >
-            <span {...Q} className="pick-card__icon-box">
-              <img {...Q} src="/icons/agent-logo.svg" className="pick-card__icon" alt="" />
-            </span>
-            <div {...Q} className="pick-card__texts">
-              <span {...Q} className="pick-card__title">
-                {t('quickstart.card.agent')}
-              </span>
-              <p {...Q} className="pick-card__desc">
-                {t('quickstart.card.agentDesc')}
-              </p>
-            </div>
-          </button>
-          <button
-            {...Q}
-            type="button"
-            className={`pick-card${card === 'code' ? ' pick-card--selected' : ''}`}
-            onClick={() => pickCard('code')}
-          >
-            <span {...Q} className="pick-card__icon-box">
-              <Icon {...Q} name="i-lucide:code" className="pick-card__icon" />
-            </span>
-            <div {...Q} className="pick-card__texts">
-              <span {...Q} className="pick-card__title">
-                {t('quickstart.card.code')}
-              </span>
-              <p {...Q} className="pick-card__desc">
-                {t('quickstart.card.codeDesc')}
-              </p>
-            </div>
-          </button>
-        </div>
+        {/* 这里原来有两张卡片（「Agent 接入」/「代码集成」）当第一层选择器。
+            2026-10-19 用户逐条点掉之后只剩 MCP / Hermes / 让 Agent 自己配三种，
+            全在 agent 一侧——「代码集成」那张卡片会变成空的，点进去没有任何内容；
+            只剩一张卡片则是个点了不产生任何变化的死控件（`AGENTS.md` 第八节）。
+            所以整行去掉，页签直接当第一层选择器。 */}
 
         <div {...Q} className="quickstart-subtabs-row">
           <div {...Q} className="quickstart-subtabs">
-            {visible.map((x) => (
+            {tabs.map((x) => (
               <button key={x.id} type="button" className={x.id === tab.id ? SUBTAB_ACTIVE : SUBTAB} onClick={() => setTabId(x.id)}>
                 <Icon name={x.icon} className="size-4 shrink-0" />
                 {tabLabel(x, lang)}
               </button>
             ))}
           </div>
-          <AccessMethodHint text={t('quickstart.hint')} />
+          <AccessMethodHint text={t('quickstart.hint')} rows={hintRows} />
         </div>
       </div>
 
       <div {...Q} className="setup-steps-block">
-        {!apiKey && (
-          <div {...Q} className="mb-4 text-sm text-[#c2410c]">
-            {t('quickstart.noKey')}{' '}
-            <Link to="/cn/apikeys" className="text-[#4044ed] hover:underline">
-              {t('quickstart.gotoKeys')}
-            </Link>
-          </div>
-        )}
-
         {tab.prompt ? (
           <div {...Q} className="quick-access-block quick-access-block--static">
             <div {...Q} className="quick-access-header">
@@ -260,10 +203,10 @@ export function QuickStart() {
                 className={PILL_OUTLINE}
                 onClick={async () => {
                   try {
-                    await navigator.clipboard.writeText(tab.prompt![lang])
+                    await copyText(tab.prompt![lang])
                     toast(t('common.copied'))
                   } catch {
-                    toast(t('common.failed'), 'err')
+                    toast(t('common.copyFailed'), 'err')
                   }
                 }}
               >

@@ -1,85 +1,39 @@
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import { api, type ProfileTemplate } from '../lib/api'
-import { ListPage } from '../components/ListPage'
-import { Dialog, TextLinkButton } from '../components/ui'
-import { BTN_DIALOG_PRIMARY, BTN_DIALOG_SECONDARY, BTN_PRIMARY, BTN_TEXT_LINK } from '../lib/cls'
-import { useProject, useT, useToast } from '../lib/store'
+import { useT } from '../lib/store'
+import { ComingSoon, PageHeader } from '../components/ui'
 
+/** 画像模板（MemOS 的 Profile Template）。
+ *
+ *  它是什么：**预定义 schema**——用 JSON 描述属性记忆（Profile）的字段结构，
+ *  最多三层嵌套，叶子是 `{value, algorithm_updatable}`。把模板绑定到用户或 Agent
+ *  就生成一个实例，之后添加消息时 MemOS 会把对话里的零散信息映射到这些字段并自动更新。
+ *  **不是本体论，也不是知识图谱的 schema。**
+ *  ⚠️ **不给官方文档外链**：那是 MemOS 官方站的地址，不是我们自己维护的部署文档。
+ *  指过去等于把「我们这一版怎么用」的说明责任推给外部站点，官方哪天改版或下线，
+ *  页面上的入口就变成死链，而我们不会收到任何信号（2026-10-19 用户要求去掉）。
+ *  等内部真的维护了一份自部署文档，再把链接加回来。
+ *
+ *  ⚠️ 这一页为什么没有列表（**只写在这里，不写到页面上**）：**当前接入的这个记忆服务
+ *  版本没有开放这组接口**——它的 openapi 一共 29 条路径，`/list/profile_template`、
+ *  `/add/profile_template` 这些一条都没有（2026-10-19 逐条核对过）。MemOS 官方文档里
+ *  这组接口是有的，但**我们接的这个部署没带**，所以怎么点都不会有数据。
+ *
+ *  ⚠️ 页面文案**故意不写上面这个原因**。2026-10-19 先写的是实话（「这个部署没有开放属性
+ *  记忆接口 / 当前接入的版本没有这组接口」），用户要求改成「建设中 / Coming soon」，
+ *  原话是「别傻乎乎的这么诚实告诉业务，那我们估计会被领导觉得不可靠」。
+ *  所以页面呈现的是产品口径，**技术口径留在上面这段注释里**——两者不一致是有意的，
+ *  不要照着页面文案把注释也改掉。
+ *
+ *  ⚠️ 空态用共用的 `ComingSoon`（与知识库同一份），文案走 `common.comingSoon*`。
+ *  原来这一页自己写了一段，和知识库那页长得不一样，用户要求统一（2026-10-19）。
+ *
+ *  ⚠️ 外层**不要**加 `max-w-[…]`：AppShell 的内容区是 `flex flex-col h-full`，
+ *  加了宽度上限会把页面卡成一条窄栏、右边整片留白（2026-10-19 用户报的布局 bug）。 */
 export function ProfileTemplates() {
   const t = useT()
-  const toast = useToast()
-  const { currentProjectId } = useProject()
-  const [pendingDelete, setPendingDelete] = useState<ProfileTemplate | null>(null)
-  const [tick, setTick] = useState(0)
-
-  const doDelete = async () => {
-    if (!pendingDelete) return
-    const target = pendingDelete
-    setPendingDelete(null)
-    try {
-      await api.profileTemplate.remove(currentProjectId, target.templateId)
-      toast(t('profile.action.delete'))
-      setTick((n) => n + 1)
-    } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), 'err')
-    }
-  }
-
   return (
     <>
-      <ListPage<ProfileTemplate>
-        title={t('profile.title')}
-        desc={t('profile.desc')}
-        rowKey={(p) => p.templateId}
-        deps={[currentProjectId, tick]}
-        actions={
-          <Link to="/cn/profileTemplate/new" className={`${BTN_PRIMARY} cursor-pointer`}>
-            <span className="iconify i-lucide:plus shrink-0 size-5" aria-hidden="true" />
-            {t('profile.newTemplate')}
-          </Link>
-        }
-        load={async (pageNum, pageSize) => {
-          const res = await api.profileTemplate.list(pageNum, pageSize, currentProjectId)
-          return { items: res.list, total: res.total }
-        }}
-        cols={[
-          { key: 'templateName', label: t('profile.col.templateName'), wrap: true, render: (p) => p.templateName },
-          { key: 'templateId', label: t('profile.col.templateId'), wrap: true, render: (p) => p.templateId },
-          { key: 'bindingCount', label: t('profile.col.bindingCount'), render: (p) => String(p.bindingCount ?? 0) },
-          { key: 'updatedAt', label: t('profile.col.updatedAt'), render: (p) => p.updatedAt ?? '-' },
-          {
-            key: 'action',
-            label: t('profile.col.action'),
-            render: (p) => (
-              <div className="flex gap-2">
-                <Link to={`/cn/profileTemplate/${p.templateId}`} className={BTN_TEXT_LINK}>
-                  {t('profile.action.view')}
-                </Link>
-                <TextLinkButton onClick={() => setPendingDelete(p)}>{t('profile.action.delete')}</TextLinkButton>
-              </div>
-            ),
-          },
-        ]}
-      />
-
-      <Dialog
-        open={!!pendingDelete}
-        title={t('profile.delete.title')}
-        onClose={() => setPendingDelete(null)}
-        footer={
-          <>
-            <button type="button" className={BTN_DIALOG_PRIMARY} onClick={doDelete}>
-              {t('common.confirm')}
-            </button>
-            <button type="button" className={BTN_DIALOG_SECONDARY} onClick={() => setPendingDelete(null)}>
-              {t('common.cancel')}
-            </button>
-          </>
-        }
-      >
-        {t('profile.delete.confirm')}
-      </Dialog>
+      <PageHeader title={t('profile.title')} desc={t('profile.desc')} />
+      <ComingSoon />
     </>
   )
 }

@@ -1,14 +1,18 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { DICTS, type Lang, type TKey } from './i18n'
+import { AnimatePresence, motion } from 'motion/react'
+import { makeT, textOf, type Lang, type ParamEntries, type TKey } from './i18n'
 import { api, type Meta, type Project, type ToolInfo } from './api'
+import { Icon } from '../components/Icon'
 
 const LANG_KEY = 'console.lang'
+
+/** 取词：普通词条返回 string，带参数的词条返回函数（要再调一次，见 i18n.ts） */
+export type TFn = <K extends TKey>(k: K) => K extends keyof ParamEntries ? ParamEntries[K] : string
 
 interface LangCtx {
   lang: Lang
   setLang: (l: Lang) => void
-  /** t('nav.apikeys') 取词；少数词条是函数，直接调用 */
-  t: <K extends TKey>(k: K) => (typeof DICTS)['zh'][K]
+  t: TFn
   /** 动态 key（非字面量）时用它，返回值一定是字符串 */
   str: (k: TKey) => string
 }
@@ -30,8 +34,8 @@ export function LangProvider({ children }: { children: ReactNode }) {
     () => ({
       lang,
       setLang: setLangState,
-      t: (k) => DICTS[lang][k] as (typeof DICTS)['zh'][typeof k],
-      str: (k) => String(DICTS[lang][k]),
+      t: makeT(lang) as TFn,
+      str: (k) => textOf(lang, k),
     }),
     [lang],
   )
@@ -67,21 +71,30 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const push = useCallback((text: string, kind: 'ok' | 'err' = 'ok') => {
     const id = Date.now() + Math.random()
     setList((l) => [...l, { id, text, kind }])
-    setTimeout(() => setList((l) => l.filter((t) => t.id !== id)), 2600)
+    setTimeout(() => setList((l) => l.filter((t) => t.id !== id)), 2800)
   }, [])
 
   return (
     <ToastContext.Provider value={{ push }}>
       {children}
-      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[999] flex flex-col gap-2 pointer-events-none">
-        {list.map((t) => (
-          <div
-            key={t.id}
-            className={`px-4 py-2 rounded-[8px] shadow-lg text-sm text-white ${t.kind === 'ok' ? 'bg-[#18181b]' : 'bg-[#dc2626]'}`}
-          >
-            {t.text}
-          </div>
-        ))}
+      <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[999] flex flex-col items-center gap-2 pointer-events-none">
+        <AnimatePresence mode="popLayout">
+          {list.map((t) => (
+            <motion.div
+              key={t.id}
+              initial={{ opacity: 0, y: -16, scale: 0.94 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -10, scale: 0.96 }}
+              transition={{ type: 'spring', stiffness: 450, damping: 30 }}
+              className={`toast toast--${t.kind}`}
+              role="status"
+              aria-live="polite"
+            >
+              <Icon name={t.kind === 'ok' ? 'i-lucide:check-circle-2' : 'i-lucide:alert-circle'} className="toast__icon" />
+              <span className="toast__text">{t.text}</span>
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
     </ToastContext.Provider>
   )
@@ -101,6 +114,12 @@ interface ProjectCtx {
   currentProjectName: string
   projects: Project[]
   loading: boolean
+  /** 项目字典是否已经落定（成功或失败都算）。
+   *
+   *  业务页取数要拿它做 `useAsync` 的 `skip`：首帧的 `currentProjectId` 还是空串，
+   *  这时发出去的请求会被 BFF 直接拒（`40000 缺少 projectId`），页面先闪一段报错，
+   *  等字典回来再打第二遍——一次加载同一份数据取两次。 */
+  ready: boolean
   reload: () => void
   /** 切换当前项目：把它置为 ENABLED，后端会把其它项目置回 DISABLED */
   setCurrent: (id: string) => Promise<void>
@@ -148,6 +167,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       currentProjectName: projects.find((p) => p.id === currentProjectId)?.name ?? '',
       projects,
       loading,
+      ready: !loading,
       reload: () => setTick((t) => t + 1),
       setCurrent: async (id: string) => {
         localStorage.setItem(PROJ_KEY, id)
@@ -169,6 +189,10 @@ export function useProject() {
 }
 
 interface MetaCtx {
+  /** 服务端是否开着鉴权（`/api/meta` 的 `authEnabled`）。没拿到 meta 时按「没开」处理 */
+  authEnabled: boolean
+  /** 只有 `page` 形态能从前端登出：basic 形态下凭据由浏览器缓存，登不掉 */
+  canLogout: boolean
   meta: Meta | null
   keyPrefix: string
   tools: ToolInfo[]
@@ -202,6 +226,10 @@ export function MetaProvider({ children }: { children: ReactNode }) {
       meta,
       keyPrefix: meta?.keyPrefix || FALLBACK_KEY_PREFIX,
       tools: meta?.tools ?? [],
+      // ⚠️ meta 没回来（或取失败）时一律当成「没开鉴权」：这时候显示「退出登录」
+      //    可能是个死按钮，而不显示最多是少一个入口——宁可少给，不要给一个点了没反应的。
+      authEnabled: Boolean(meta?.authEnabled),
+      canLogout: Boolean(meta?.authEnabled) && meta?.authMode === 'page',
     }),
     [meta],
   )

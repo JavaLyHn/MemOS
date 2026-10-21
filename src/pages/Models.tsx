@@ -1,115 +1,66 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { TECH_CONFIG_URL, LINKS } from '../lib/config'
+/** 模型列表。
+ *
+ *  ⚠️ 这一页**读的是上游 Pod 真正在读的那份配置**（BFF `GET /api/dashboard/models`
+ *  → ConfigMap `memos-original-api`），不是前端维护的静态副本。
+ *
+ *  2026-10-19 之前它读 `public/tech-config/*.json`，那是一份**手写的假清单**：
+ *  模型名是编的（`memory-writer` / `embedding-jina-v5` / `rerank-gte` / `deepseek-v3` /
+ *  `claude-sonnet-4-6` / `qwen3-32b`），还混了一条标着「规划中」的 `dream-organizer`。
+ *  上游一个都不叫这些名字——用户一眼就看出来了（「数据好像都是假的？」）。
+ *
+ *  ⚠️ 同时删掉了每行那个「查看详情」按钮：它只弹一句「模型详情页还没接，先看文档吧」，
+ *  点了等于没点。留着比删掉更糟——业务会以为是自己没点对。行内现在只剩**真能用**的
+ *  「复制模型名称」。 */
+import { useState } from 'react'
+import { api, type ModelRecord } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
-import { useLang, useT, useToast } from '../lib/store'
-import { PageHeader, Panel, StateRow, Table, TD, Th, TextLinkButton } from '../components/ui'
-import { TAB_BTN, TAB_INDICATOR, TAB_STRIP } from '../lib/cls'
-
-interface ModelRow {
-  modelName: string
-  provider?: string
-  tags?: string[]
-  isReleased?: boolean
-}
+import { useT, useToast } from '../lib/store'
+import { copyText } from '../lib/clipboard'
+import { PageHeader, Panel, StateRow, Table, TD, Th } from '../components/ui'
+import { Tabs } from '../components/ui/tabs'
+import { RowActions } from '../components/ui/row-actions'
 
 const TABS = [
-  { key: 'proprietary', label: 'models.tab.proprietary' },
+  { key: 'memory', label: 'models.tab.memory' },
   { key: 'chat', label: 'models.tab.chat' },
 ] as const
 
-/** 能力标签的两种样式，逐字取自设计稿 */
-const TAG_PRIMARY = 'inline-block h-6 px-2 text-xs font-normal border rounded-md leading-6 bg-[#eef0ff] border-[#c7c9f7] text-primary'
-const TAG_PLAIN =
-  'inline-block h-6 px-2 text-xs text-second-gray font-normal border-1 border-input-border rounded-md bg-[#F1F5F9] leading-6'
+/** 「记忆读取」这类角色名做成标签，扫一眼就能分出链路位置。
+ *
+ *  ⚠️ 2026-10-19 起**不再显示 `spec`（提供方主机名 / 向量维度 / 重排后端）**，
+ *  列头也从「用途与参数」改成「用途」——用户的要求是「参数不用写了」。
+ *  接口里 `spec` 字段还留着（上游配置的真实值，见 `adapters/models.ts`），
+ *  要恢复显示把上面那个 `SPEC_TAG` 和一行 `<span>` 加回来就行。 */
+const ROLE_TAG = 'inline-block h-6 px-2.5 text-xs font-medium rounded-md leading-6 bg-accent-soft border border-accent/30 text-accent'
 
-/** 未发布模型的「查看详情」是灰的、不可点，用另一套类名 */
-const BTN_DISABLED_LINK = 'text-[14px] font-medium text-[#90A1B9] bg-transparent border-none p-0 cursor-not-allowed'
-
-/** 模型列表走静态 JSON（形状 `{records: [...]}`），不经过后端接口 */
-async function fetchModels(tab: string, lang: string): Promise<ModelRow[]> {
-  const res = await fetch(`${TECH_CONFIG_URL}/${tab}.${lang}.json`)
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const data = (await res.json()) as { records?: ModelRow[] }
-  return data.records ?? []
-}
-
-/** 标签条：选中项下面那条线跟着滑，位置由页面实测 */
-export function Tabs({
-  items,
-  value,
-  onChange,
-}: {
-  items: { key: string; label: ReactNode }[]
-  value: string
-  onChange: (k: string) => void
-}) {
-  const strip = useRef<HTMLDivElement>(null)
-  const [bar, setBar] = useState({ x: 0, w: 0 })
-
-  useEffect(() => {
-    const measure = () => {
-      const el = strip.current?.querySelector<HTMLElement>(`[data-tab-key="${value}"]`)
-      if (el) setBar({ x: el.offsetLeft, w: el.offsetWidth })
-    }
-    measure()
-    window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
-  }, [value, items])
-
-  return (
-    <div className="flex items-center gap-2 flex-col w-full">
-      <div ref={strip} className={TAB_STRIP}>
-        <div className={TAB_INDICATOR} style={{ width: bar.w, translate: `${bar.x}px` }} />
-        {items.map((x) => (
-          <button
-            key={x.key}
-            type="button"
-            data-tab-key={x.key}
-            data-state={value === x.key ? 'active' : 'inactive'}
-            className={TAB_BTN}
-            onClick={() => onChange(x.key)}
-          >
-            <span className="truncate">{x.label}</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
+const fetchModels = async (): Promise<ModelRecord[]> => (await api.models.list()).records
 
 export function Models() {
   const t = useT()
   const toast = useToast()
-  const { lang } = useLang()
-  const [tab, setTab] = useState<string>(TABS[0].key)
-  const { data, state, error } = useAsync(() => fetchModels(tab, lang), [tab, lang])
+  const [tab, setTab] = useState<(typeof TABS)[number]['key']>(TABS[0].key)
+  const { data, state, error } = useAsync(fetchModels, [])
 
   const copy = async (text: string) => {
     try {
-      await navigator.clipboard.writeText(text)
+      await copyText(text)
       toast(t('common.copied'))
     } catch {
-      toast(`${t('common.failed')}：剪贴板不可用`, 'err')
+      // ⚠️ 不写「请求失败」：这里根本没发请求。控制台跑在 `http://<内网 IP>:8280`，
+      //    不是 secure context，`navigator.clipboard` 是 undefined，锅在浏览器。
+      toast(t('common.copyFailed'), 'err')
     }
   }
 
+  const rows = (data ?? []).filter((m) => m.group === tab)
   const cols = 3
 
   return (
     <>
-      <div className="flex mb-4 py-3 px-4 bg-white/80 border border-[#DADBFF] rounded-[8px] text-sm leading-5">
-        <span className="text-[#314158] font-medium">{t('models.tipTitle')}</span>
-        <span className="text-[#9FA1F6]">｜</span>
-        <span className="text-[#62748E]">{t('models.tipText')}</span>
-        <a href={LINKS.docs} rel="noopener noreferrer" target="_blank" className={`${BTN_LINK_DOC} ml-1`}>
-          {t('models.viewDocs')}
-        </a>
-      </div>
-
       <PageHeader title={t('models.title')} desc={t('models.desc')} />
 
       <div className="flex flex-col flex-1 space-y-4 h-full">
-        <Tabs items={TABS.map((x) => ({ key: x.key, label: t(x.label) }))} value={tab} onChange={setTab} />
+        <Tabs label={t('models.title')} items={TABS.map((x) => ({ key: x.key, label: t(x.label) }))} value={tab} onChange={setTab} />
 
         <div className="flex-1">
           <div className="h-full flex flex-col justify-between">
@@ -118,49 +69,27 @@ export function Models() {
                 head={
                   <>
                     <Th>{t('models.col.modelName')}</Th>
-                    <Th>{t('models.col.labels')}</Th>
+                    <Th>{t('models.col.role')}</Th>
                     <Th>{t('models.col.action')}</Th>
                   </>
                 }
               >
                 {state !== 'ready' && <StateRow colSpan={cols} state={state} error={error} />}
-                {state === 'ready' && data?.length === 0 && <StateRow colSpan={cols} state="ready" />}
+                {state === 'ready' && rows.length === 0 && <StateRow colSpan={cols} state="ready" />}
                 {state === 'ready' &&
-                  data?.map((m) => {
-                    const released = m.isReleased !== false
-                    const tags = m.tags ?? []
-                    return (
-                      <tr key={m.modelName} className="data-[selected=true]:bg-elevated/50">
-                        <td data-pinned="false" className={TD}>
-                          <span className={released ? 'leading-5 text-second-gray' : 'leading-5 text-third-gray'}>
-                            {m.modelName}
-                            {released ? '' : t('models.comingSoon')}
-                          </span>
-                        </td>
-                        <td data-pinned="false" className={TD}>
-                          <div className="flex gap-2 flex-wrap">
-                            {tags.map((tag, i) => (
-                              <span key={tag} className={released && i === 0 ? TAG_PRIMARY : TAG_PLAIN}>
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        </td>
-                        <td data-pinned="false" className={TD}>
-                          {released ? (
-                            <div className="flex gap-2">
-                              <TextLinkButton onClick={() => copy(m.modelName)}>{t('models.copyModelName')}</TextLinkButton>
-                              <TextLinkButton onClick={() => toast(t('models.detailTodo'))}>{t('models.viewDetails')}</TextLinkButton>
-                            </div>
-                          ) : (
-                            <button type="button" disabled className={BTN_DISABLED_LINK}>
-                              {t('models.viewDetails')}
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    )
-                  })}
+                  rows.map((m) => (
+                    <tr key={m.source} className="data-[selected=true]:bg-elevated/50">
+                      <td data-pinned="false" className={TD}>
+                        <span className="leading-5 text-second-gray">{m.model}</span>
+                      </td>
+                      <td data-pinned="false" className={TD}>
+                        <span className={ROLE_TAG}>{m.role}</span>
+                      </td>
+                      <td data-pinned="false" className={TD}>
+                        <RowActions actions={[{ label: t('models.copyModelName'), icon: 'i-lucide:copy', onClick: () => copy(m.model) }]} />
+                      </td>
+                    </tr>
+                  ))}
               </Table>
             </Panel>
           </div>
@@ -169,7 +98,3 @@ export function Models() {
     </>
   )
 }
-
-/** 提示条里的「查看文档」，文字按钮变体再加 ml-1 */
-const BTN_LINK_DOC =
-  'rounded-md font-medium inline-flex items-center disabled:cursor-not-allowed aria-disabled:cursor-not-allowed disabled:opacity-75 aria-disabled:opacity-75 transition-colors text-sm gap-1.5 text-primary hover:text-primary/75 active:text-primary/75 aria-disabled:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary cursor-pointer p-0 disabled:text-disabled'

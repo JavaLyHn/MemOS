@@ -1,10 +1,13 @@
 import { useState } from 'react'
 import { api, EVENT_TYPES, type LogDetail, type RequestLog } from '../lib/api'
 import { ListPage } from '../components/ListPage'
-import { Dialog, Tag, TextLinkButton } from '../components/ui'
+import { Dialog, Tag } from '../components/ui'
+import { Tabs } from '../components/ui/tabs'
+import { RowActions } from '../components/ui/row-actions'
 import { FilterDateRange, FilterField, FilterFieldRow, FilterInput, FilterPopover, FilterSelect } from '../components/FilterPopover'
 import { FILTER_LABEL } from '../lib/cls'
-import { useProject, useT } from '../lib/store'
+import { useLang, useProject, useToast, useT } from '../lib/store'
+import { errText } from '../lib/i18n'
 
 /** extractMemoryDirect 展示成 extractMemory */
 const displayEvent = (e: string) => (e === 'extractMemoryDirect' ? 'extractMemory' : e)
@@ -36,7 +39,9 @@ const NO_FILTER: LogFilters = { eventType: '', subjectType: '', subjectId: '', s
 
 export function Requests() {
   const t = useT()
-  const { currentProjectId } = useProject()
+  const { lang } = useLang()
+  const toast = useToast()
+  const { currentProjectId, ready } = useProject()
   const [filters, setFilters] = useState<LogFilters>(NO_FILTER)
   const [draft, setDraft] = useState<LogFilters>(NO_FILTER)
   const [detail, setDetail] = useState<LogDetail | null>(null)
@@ -50,8 +55,10 @@ export function Requests() {
     setDetail(null)
     try {
       setDetail(await api.log.detail(row.id))
-    } catch {
-      setDetail({ ...row, requestBody: '', responseBody: '' } as LogDetail)
+    } catch (e) {
+      // 取详情失败就明确报错。原来会退化成「用列表行 + 空正文」渲染，
+      // 看起来像这次调用本来就没有请求体，排障时会往错误的方向查。
+      toast(errText(lang, e), 'err')
     } finally {
       setLoading(false)
     }
@@ -64,9 +71,9 @@ export function Requests() {
         desc={t('requests.desc')}
         searchable
         searchPlaceholder={t('requests.searchPlaceholder')}
-        panelClassName="max-h-[calc(100vh-200px)]"
         rowKey={(r) => r.id}
         deps={[currentProjectId, filters]}
+        skip={!ready}
         onRowClick={openDetail}
         filter={(close) => (
           <FilterPopover
@@ -152,18 +159,22 @@ export function Requests() {
           {
             key: 'duration',
             label: t('requests.col.latency'),
-            render: (r) => (r.duration != null ? `${r.duration}ms` : '-'),
+            // 异步 add 还没跑完时后端给 null（真实耗时还没产生）。这里留白，
+            // 不写 '-'、更不把入队耗时当真实延时显示。
+            render: (r) => (r.duration != null ? `${r.duration}ms` : ''),
           },
           {
             key: 'action',
             label: t('requests.col.action'),
-            render: (r) => <TextLinkButton onClick={() => openDetail(r)}>{t('requests.viewDetails')}</TextLinkButton>,
+            render: (r) => (
+              <RowActions actions={[{ label: t('requests.viewDetails'), icon: 'i-lucide:eye', onClick: () => openDetail(r) }]} />
+            ),
           },
         ]}
       />
 
       <Dialog open={loading || !!detail} title={t('requests.detail.title')} onClose={() => setDetail(null)}>
-        {loading && <p className="text-[#62748E]">{t('common.loading')}</p>}
+        {loading && <p className="text-ink-muted">{t('common.loading')}</p>}
         {detail && (
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
@@ -171,7 +182,7 @@ export function Requests() {
                 [
                   ['traceId', detail.traceId],
                   ['status', detail.status],
-                  ['duration', detail.duration != null ? `${detail.duration}ms` : '-'],
+                  ['duration', detail.duration != null ? `${detail.duration}ms` : ''],
                   ['createTime', detail.createTime],
                   ['userId', detail.userId],
                   ['agentId', detail.agentId],
@@ -180,36 +191,25 @@ export function Requests() {
                 ] as const
               ).map(([k, v]) => (
                 <div key={k} className="flex gap-2">
-                  <span className="w-[120px] shrink-0 text-[#62748E]">{k}</span>
-                  <span className="min-w-0 break-all text-[#314158]">{v ?? '-'}</span>
+                  <span className="w-[120px] shrink-0 text-ink-muted">{k}</span>
+                  <span className="min-w-0 break-all text-ink-secondary">{v ?? '-'}</span>
                 </div>
               ))}
             </div>
 
-            <div className="flex gap-2 border-b border-[#E2E8F0]">
-              {(
-                [
-                  ['request', t('requests.detail.request')],
-                  ['response', t('requests.detail.response')],
-                ] as const
-              ).map(([k, label]) => (
-                <button
-                  key={k}
-                  type="button"
-                  className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${
-                    tab === k ? 'border-[#4044ed] text-[#4044ed]' : 'border-transparent text-[#62748E]'
-                  }`}
-                  onClick={() => setTab(k)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            <Tabs
+              label={t('requests.detail.title')}
+              value={tab}
+              onChange={setTab}
+              items={[
+                { key: 'request', label: t('requests.detail.request') },
+                { key: 'response', label: t('requests.detail.response') },
+              ]}
+            />
 
-            <pre className="max-h-[320px] overflow-auto rounded-[8px] border border-[#E2E8F0] bg-[#f7f8fb] p-3 font-mono text-xs whitespace-pre-wrap break-all">
+            <pre className="max-h-[320px] overflow-auto rounded-lg border border-line bg-surface-muted p-3 font-mono text-xs text-ink whitespace-pre-wrap break-all">
               {pretty(tab === 'request' ? detail.requestBody : detail.responseBody)}
             </pre>
-            <p className="text-xs text-[#90A1B9]">{t('requests.detail.bodyNote')}</p>
           </div>
         )}
       </Dialog>

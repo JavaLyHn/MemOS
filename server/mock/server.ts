@@ -32,10 +32,13 @@ function fail(res: http.ServerResponse, code: number, message: string, status = 
 
 function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve) => {
-    let raw = ''
-    req.on('data', (c) => (raw += c))
+    // ⚠️ 按字节攒、最后一次性按 UTF-8 解码：`raw += chunk` 会让每个分片各自解码，
+    //    汉字跨分片时会变成 U+FFFD（同样的写法在 BFF 里已经造成过一次真实的静默损坏）
+    const chunks: Buffer[] = []
+    req.on('data', (c: Buffer) => chunks.push(c))
     req.on('end', () => {
       try {
+        const raw = Buffer.concat(chunks).toString('utf8')
         resolve(raw ? JSON.parse(raw) : {})
       } catch {
         resolve({})
@@ -318,7 +321,7 @@ const ROUTES: Record<string, Handler> = {
     return publicMemory(row)
   },
 
-  /* -------------------------------------------------------- 属性树模板 */
+  /* -------------------------------------------------------- 画像模板 */
 
   'POST /api/dashboard/profileTemplate/list': ({ body }) => {
     const rows = byProject(db.templates, str(body.projectId))
@@ -455,10 +458,65 @@ const ROUTES: Record<string, Handler> = {
     allowedKnowledgebaseCount: 10,
   }),
 
-  'POST /api/user/subscription/details': () => ({
-    cycles: [{ id: 'cycle_current', cycleStartTime: '2026-10-01', cycleEndTime: '2026-10-31' }],
-    currentCycle: { id: 'cycle_current' },
+  /* -------------------------------------------------------------- 模型 */
+
+  'GET /api/dashboard/models': () => ({
+    records: [
+      { role: '记忆读取', model: 'qwen-max', spec: 'dashscope.aliyuncs.com', source: 'MEMRADER_MODEL', group: 'memory' },
+      { role: '记忆写入 / 对话', model: 'qwen-plus', spec: 'dashscope.aliyuncs.com', source: 'MOS_CHAT_MODEL', group: 'chat' },
+      { role: '向量化', model: 'text-embedding-v3', spec: '1536 维', source: 'MOS_EMBEDDER_MODEL', group: 'memory' },
+      { role: '重排', model: 'bge-reranker-large', spec: '后端 bge', source: 'MOS_RERANKER_MODEL', group: 'memory' },
+    ],
+    total: 4,
   }),
+
+  /* ------------------------------------------ 图谱 */
+
+  'GET /api/dashboard/graph/memories': ({ query }) => {
+    const tenant = str(query.get('tenant'), 'proj_default')
+    const list = db.memories.filter((m) => !m.projectId || m.projectId === tenant)
+    const GRAPH_TYPES = ['LongTermMemory', 'PreferenceMemory', 'InsightMemory', 'Context', 'UserMemory']
+    const nodes = list.map((m, idx) => ({
+      id: m.id,
+      label: str(m.memoryText || m.content, '记忆节点'),
+      labelTruncated: false,
+      memoryType: GRAPH_TYPES[idx % GRAPH_TYPES.length],
+      createdAt: str(m.createdAt, iso(new Date())),
+      sessionId: `session_${idx % 4}`,
+      clusterId: `session:session_${idx % 4}`,
+      userId: str(m.userId, 'user_default'),
+      sourceIds: [],
+    }))
+    const links: { source: string; target: string; kind: 'session' | 'parent' | 'merged' | 'derived' }[] = []
+    for (let i = 1; i < nodes.length; i++) {
+      if (nodes[i].sessionId === nodes[i - 1].sessionId) {
+        links.push({ source: nodes[i - 1].id, target: nodes[i].id, kind: 'session' })
+      }
+    }
+    const typeCount = new Map<string, number>()
+    for (const n of nodes) typeCount.set(n.memoryType, (typeCount.get(n.memoryType) ?? 0) + 1)
+    const types = [...typeCount.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count)
+
+    return {
+      nodes,
+      links,
+      stats: {
+        nodes: nodes.length,
+        links: links.length,
+        sessions: 4,
+        clusters: 4,
+        orphans: 0,
+        truncated: false,
+        types,
+      },
+    }
+  },
+
+  'GET /api/dashboard/graph/memory': ({ query }) => {
+    const id = str(query.get('id'))
+    const row = db.memories.find((m) => m.id === id)
+    return { id, memory: str(row?.memoryText || row?.content, '记忆全文内容') }
+  },
 
   /* ------------------------------------------ 本控制台的扩展 */
 

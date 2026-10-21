@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAsync } from '../lib/useAsync'
-import { api } from '../lib/api'
-import { Dialog, Pager, Panel, StateRow, Table, TD, Th } from '../components/ui'
-import { Icon } from '../components/Icon'
-import { BTN_DIALOG_PRIMARY, BTN_DIALOG_SECONDARY, BTN_PAGER } from '../lib/cls'
-import { useProject, useT, useToast } from '../lib/store'
+import { api, type Memory } from '../lib/api'
+import { Dialog, Pager, Panel, SearchBox, StateRow, Table, TD, Th } from '../components/ui'
+import { Tabs } from '../components/ui/tabs'
+import { RowActions } from '../components/ui/row-actions'
+import { Checkbox } from '../components/ui/checkbox'
+import { Button } from '../components/ui/button'
+import { useProject, useT, useToast, useLang } from '../lib/store'
+import { errText } from '../lib/i18n'
 
 /** 标签：类型值 + i18n 词条 */
 const TABS = [
@@ -16,48 +19,18 @@ const TABS = [
   { type: 'tool_mem', label: 'memory.tab.tool_mem' },
 ] as const
 
-const PILL_BASE =
-  'h-[32px] px-[10px] flex items-center justify-center text-[14px] font-medium cursor-pointer whitespace-nowrap rounded-[6px]'
-const PILL_ACTIVE = `${PILL_BASE} bg-primary text-white shadow-sm`
-const PILL_IDLE = `${PILL_BASE} text-[#6B7280] hover:text-primary hover:bg-gray-50`
-
 /** 批量删除按钮。没选中任何行时是灰的、不可点 */
 const BTN_BATCH_ON =
-  'inline-flex items-center py-1.5 text-sm gap-1.5 ring-inset ring-accented hover:bg-elevated active:bg-elevated focus:outline-none focus-visible:ring-2 focus-visible:ring-inverted h-8 rounded-[6px] px-4 font-medium transition-all duration-200 border bg-white text-primary border-primary cursor-pointer'
+  'inline-flex items-center h-8 px-3 text-xs font-medium rounded-lg border border-danger/40 bg-danger-soft text-danger hover:bg-danger-soft transition-colors cursor-pointer shadow-2xs'
 const BTN_BATCH_OFF =
-  'inline-flex items-center py-1.5 text-sm gap-1.5 ring-inset ring-accented focus:outline-none h-8 rounded-[6px] px-4 font-medium transition-all duration-200 border bg-white text-[#C0C4CC] border-[#E4E7ED] cursor-not-allowed ring-0'
-
-const SEARCH_INPUT =
-  'w-full border-0 appearance-none focus:outline-none transition-colors py-1.5 gap-1.5 bg-default ring ring-inset ring-accented focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary pe-9 h-8 rounded-[6px] px-3 text-[14px] text-[#314158] placeholder:text-[#90A1B9] outline-none'
-
-const FILTER_BTN = `${BTN_PAGER} h-8 w-8 px-0 flex justify-center`
-
-/** 操作列的三个动作，用 <span> 而不是按钮 */
-const ACTION = 'cursor-pointer text-[14px] font-medium transition-all duration-200 hover:opacity-70'
-
-function Checkbox({ checked, indeterminate, onChange }: { checked: boolean; indeterminate?: boolean; onChange: (v: boolean) => void }) {
-  const state = indeterminate ? 'indeterminate' : checked ? 'checked' : 'unchecked'
-  return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={state === 'checked'}
-      data-state={state}
-      className={`rounded-sm ring ring-inset ring-accented overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary size-4 flex items-center justify-center cursor-pointer ${
-        state === 'unchecked' ? 'bg-default' : 'bg-primary'
-      }`}
-      onClick={() => onChange(!checked)}
-    >
-      {state !== 'unchecked' && <Icon name="i-lucide:check" className="size-3 text-white" />}
-    </button>
-  )
-}
+  'inline-flex items-center h-8 px-3 text-xs font-medium rounded-lg border border-line bg-surface-muted/50 text-ink-faint cursor-not-allowed'
 
 export function Memories() {
   const t = useT()
+  const { lang } = useLang()
   const toast = useToast()
-  const { currentProjectId } = useProject()
-  const [tab, setTab] = useState<string>(TABS[0].type)
+  const { currentProjectId, ready } = useProject()
+  const [tab, setTab] = useState<(typeof TABS)[number]['type']>(TABS[0].type)
   const [page, setPage] = useState(1)
   const [draft, setDraft] = useState('')
   const [q, setQ] = useState('')
@@ -65,6 +38,8 @@ export function Memories() {
   const [selected, setSelected] = useState<string[]>([])
   const [counts, setCounts] = useState<Record<string, number>>({})
   const [pendingDelete, setPendingDelete] = useState<string[] | null>(null)
+  /** 详情弹窗。`null` = 关着。点「查看详情」时才按 id 取那**一条**（不是把列表整页拿来用）。 */
+  const [detail, setDetail] = useState<{ loading: boolean; error: string; memory: Memory | null } | null>(null)
 
   const pageSize = 10
 
@@ -78,6 +53,9 @@ export function Memories() {
         memSearchContent: q,
       }),
     [currentProjectId, tab, page, q, tick],
+    // 字典没回来之前 `currentProjectId` 是空串，发出去必被 BFF 拒（40000 未知项目），
+    // 页面会先闪一段「请求失败」再打第二遍
+    { skip: !ready },
   )
   const rows = useMemo(() => data?.memListItemResponseList ?? [], [data])
   const total = data?.total ?? 0
@@ -109,16 +87,44 @@ export function Memories() {
         toast(t('memory.deleteDone')(ids.length))
         setTick((x) => x + 1)
       } catch (e) {
-        toast(e instanceof Error ? e.message : String(e), 'err')
+        toast(errText(lang, e), 'err')
       }
     },
-    [tab, t, toast],
+    [tab, t, toast, lang],
   )
 
-  const showProfileTree = tab === 'profile_mem'
+  /** 取单条详情。
+   *
+   *  ⚠️ 按 id 单取，**不要**改成「从当前页的 rows 里找」：上游的列表接口走白名单投影，
+   *  本来就没有详情需要的全部字段；而且列表是分页的，翻页后当前页的 rows 就换了。
+   *  BFF 的 `memory/detail` 走 `GET /product/get_memory/{id}`，只取一条。 */
+  const openDetail = useCallback(
+    async (memoryId: string) => {
+      setDetail({ loading: true, error: '', memory: null })
+      try {
+        const m = await api.memory.detail(memoryId, tab)
+        setDetail({ loading: false, error: '', memory: m })
+      } catch (e) {
+        setDetail({ loading: false, error: errText(lang, e), memory: null })
+      }
+    },
+    [tab, lang],
+  )
+
   const showSkillName = tab === 'skill_mem'
-  const showDownload = tab === 'skill_mem'
-  const colCount = 4 + (showProfileTree ? 1 : 0) + (showSkillName ? 1 : 0) + 2
+  /** 「事件记忆」里混着两种类型（Context / InsightMemory），必须列出来才分得清。
+   *  其余页签一个页签只有一种类型，再列一列是噪音。 */
+  const showMemoryType = tab === 'event_mem'
+  const colCount = 4 + (showSkillName ? 1 : 0) + (showMemoryType ? 1 : 0) + 2
+
+  /* 「用户记忆」标签上原来还有一列「画像模板 ID」（模板 id / 实例 id）。
+   * 2026-10-19 去掉：这个部署的上游**不下发**模板 id（实测 110 条 UserMemory 里 0 条有
+   * `template_id`），而实例 id 早先是从 `working_binding` 取的——那是 WorkingMemory 的
+   * 血缘 id，多数还等于这条记忆自己的 id，等于在「画像模板 ID」底下把行 id 又印一遍。
+   * 两处都取不到值，那一列在页面上就是一片 `-`。
+   *
+   * 详情抽屉里那段（`detail.memory.profileTemplateId && …`）**留着**：它自带判断，
+   * 上游哪天真的下发模板 id 就会自己出现。 */
 
   /** 只认当前页还在的 id，翻页、换标签、重新取数后旧选中自动失效 */
   const liveSelected = useMemo(() => {
@@ -129,79 +135,48 @@ export function Memories() {
   const allChecked = rows.length > 0 && liveSelected.length === rows.length
   const someChecked = liveSelected.length > 0 && !allChecked
 
-  const countLabel = useMemo(() => (type: string) => `（${counts[type] ?? 0}）`, [counts])
-
   return (
     <>
       <div data-v-1df75f9b="" className="w-full h-full flex flex-col gap-y-4">
         <div className="flex justify-between items-center">
-          <div className="flex-1 flex items-center gap-x-2">
-            <div className="shrink-0 text-[18px] font-semibold text-second-gray">{t('memory.title')}</div>
-            <div className="flex-1 h-5 w-fit max-w-full leading-5 text-[14px] text-[#6B7280] text-ellipsis overflow-hidden whitespace-nowrap">
-              <span className="text-[14px] truncate">{t('memory.desc')}</span>
-            </div>
+          <div className="flex-1 flex items-center gap-x-3">
+            <h2 className="text-lg font-semibold text-ink leading-6">{t('memory.title')}</h2>
+            <p className="text-xs text-ink-muted truncate max-w-xl">{t('memory.desc')}</p>
           </div>
           <div className="flex items-center gap-x-2">
-            <div className="relative group">
-              <button
-                type="button"
-                disabled={liveSelected.length === 0}
-                className={liveSelected.length === 0 ? BTN_BATCH_OFF : BTN_BATCH_ON}
-                onClick={() => setPendingDelete(liveSelected)}
-              >
-                {t('memory.action.batchDelete')}
-              </button>
-            </div>
-            <div className="relative inline-flex items-center w-[250px]">
-              <input
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key !== 'Enter') return
-                  setQ(draft.trim())
-                  setPage(1)
-                }}
-                placeholder={t('memory.searchPlaceholder')}
-                className={SEARCH_INPUT}
-              />
-              <span className="absolute inset-y-0 end-0 flex items-center pe-2.5">
-                <Icon name="i-ri:search-line" className="shrink-0 text-dimmed size-5" />
-              </span>
-            </div>
-            <div className="relative">
-              <button
-                type="button"
-                className={FILTER_BTN}
-                aria-label={t('memory.action.filter')}
-                onClick={() => toast(t('memory.filterTodo'))}
-              >
-                <Icon name="i-db-filter-line" className="shrink-0 size-5" />
-              </button>
-            </div>
+            <button
+              type="button"
+              disabled={liveSelected.length === 0}
+              className={liveSelected.length === 0 ? BTN_BATCH_OFF : BTN_BATCH_ON}
+              onClick={() => setPendingDelete(liveSelected)}
+            >
+              {t('memory.action.batchDelete')}
+            </button>
+            <SearchBox
+              value={draft}
+              onChange={setDraft}
+              onSubmit={() => {
+                setQ(draft.trim())
+                setPage(1)
+              }}
+              placeholder={t('memory.searchPlaceholder')}
+            />
           </div>
         </div>
 
-        <div className="flex items-center gap-1 bg-white p-[4px] rounded-[8px] w-fit">
-          {TABS.map((x) => (
-            <div
-              key={x.type}
-              role="tab"
-              aria-selected={tab === x.type}
-              className={tab === x.type ? PILL_ACTIVE : PILL_IDLE}
-              onClick={() => {
-                setTab(x.type)
-                setPage(1)
-              }}
-            >
-              {t(x.label)}
-              {countLabel(x.type)}
-            </div>
-          ))}
-        </div>
+        <Tabs
+          label={t('memory.title')}
+          value={tab}
+          onChange={(k) => {
+            setTab(k)
+            setPage(1)
+          }}
+          items={TABS.map((x) => ({ key: x.type, label: t(x.label), count: counts[x.type] ?? 0 }))}
+        />
 
         <div className="flex-1 min-h-0 overflow-hidden">
-          <div className="h-full flex flex-col justify-between">
-            <Panel className="memory-list-table">
+          <div className="flex h-full min-h-0 flex-col gap-3">
+            <Panel className="memory-list-table flex-1 min-h-0">
               <Table
                 head={
                   <>
@@ -211,7 +186,7 @@ export function Memories() {
                           <Checkbox
                             checked={allChecked}
                             indeterminate={someChecked}
-                            onChange={(v) => setSelected(v ? rows.map((m) => m.memoryId) : [])}
+                            onCheckedChange={(v) => setSelected(v ? rows.map((m) => m.memoryId) : [])}
                           />
                         </div>
                       </div>
@@ -219,7 +194,7 @@ export function Memories() {
                     <Th>{t('memory.col.createdAt')}</Th>
                     <Th>{t('memory.col.subjectType')}</Th>
                     <Th>{t('memory.col.subjectId')}</Th>
-                    {showProfileTree && <Th>{t('memory.col.profileTreeId')}</Th>}
+                    {showMemoryType && <Th>{t('memory.col.memoryType')}</Th>}
                     {showSkillName && <Th>{t('memory.col.skillName')}</Th>}
                     <Th>{t('memory.col.content')}</Th>
                     <Th>{t('memory.col.action')}</Th>
@@ -235,7 +210,9 @@ export function Memories() {
                         <div className="flex justify-center">
                           <Checkbox
                             checked={liveSelected.includes(m.memoryId)}
-                            onChange={(v) => setSelected((prev) => (v ? [...prev, m.memoryId] : prev.filter((x) => x !== m.memoryId)))}
+                            onCheckedChange={(v) =>
+                              setSelected((prev) => (v ? [...prev, m.memoryId] : prev.filter((x) => x !== m.memoryId)))
+                            }
                           />
                         </div>
                       </td>
@@ -248,9 +225,9 @@ export function Memories() {
                       <td data-pinned="false" className={TD}>
                         {m.externalUserId}
                       </td>
-                      {showProfileTree && (
-                        <td data-pinned="false" className={`${TD} max-w-[180px] truncate`}>
-                          {m.profileTemplateId || m.profileInstanceId || '-'}
+                      {showMemoryType && (
+                        <td data-pinned="false" className={`${TD} whitespace-nowrap`}>
+                          {m.memoryType ? t(`graph.type.${m.memoryType}` as 'graph.type.Other') : '-'}
                         </td>
                       )}
                       {showSkillName && (
@@ -262,19 +239,17 @@ export function Memories() {
                         {m.memoryContent}
                       </td>
                       <td data-pinned="false" className={TD}>
-                        <div className="flex gap-4">
-                          <span className={ACTION} style={{ color: '#4044ED' }} onClick={() => toast(t('memory.detailTodo'))}>
-                            {t('memory.action.detail')}
-                          </span>
-                          {showDownload && (
-                            <span className={ACTION} style={{ color: '#4044ED' }} onClick={() => toast(t('memory.downloadTodo'))}>
-                              {t('memory.action.download')}
-                            </span>
-                          )}
-                          <span className={ACTION} style={{ color: '#4044ED' }} onClick={() => setPendingDelete([m.memoryId])}>
-                            {t('memory.action.delete')}
-                          </span>
-                        </div>
+                        <RowActions
+                          actions={[
+                            { label: t('memory.action.detail'), icon: 'i-lucide:eye', onClick: () => openDetail(m.memoryId) },
+                            {
+                              label: t('memory.action.delete'),
+                              icon: 'i-lucide:trash-2',
+                              tone: 'danger',
+                              onClick: () => setPendingDelete([m.memoryId]),
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))}
@@ -291,16 +266,62 @@ export function Memories() {
         onClose={() => setPendingDelete(null)}
         footer={
           <>
-            <button type="button" className={BTN_DIALOG_PRIMARY} onClick={() => pendingDelete && doDelete(pendingDelete)}>
-              {t('common.confirm')}
-            </button>
-            <button type="button" className={BTN_DIALOG_SECONDARY} onClick={() => setPendingDelete(null)}>
+            <Button variant="secondary" onClick={() => setPendingDelete(null)}>
               {t('common.cancel')}
-            </button>
+            </Button>
+            <Button variant="destructive" onClick={() => pendingDelete && doDelete(pendingDelete)}>
+              {t('common.confirm')}
+            </Button>
           </>
         }
       >
         {t('memory.deleteConfirm')(pendingDelete?.length ?? 0)}
+      </Dialog>
+
+      <Dialog
+        open={!!detail}
+        title={t('memory.detailTitle')}
+        onClose={() => setDetail(null)}
+        footer={
+          <Button variant="secondary" onClick={() => setDetail(null)}>
+            {t('common.close')}
+          </Button>
+        }
+      >
+        {detail?.loading && <p className="text-sm text-ink-muted">{t('common.loading')}</p>}
+        {detail?.error && <p className="text-sm text-warning">{detail.error}</p>}
+        {detail?.memory && (
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt className="text-ink-muted">{t('memory.col.content')}</dt>
+            <dd className="text-ink-secondary whitespace-pre-wrap break-words">{detail.memory.memoryContent || '-'}</dd>
+            <dt className="text-ink-muted">{t('memory.col.subjectType')}</dt>
+            <dd className="text-ink-secondary">{t(`memory.subjectType.${detail.memory.subjectType}` as 'memory.subjectType.user')}</dd>
+            <dt className="text-ink-muted">{t('memory.col.subjectId')}</dt>
+            <dd className="text-ink-secondary break-all">{detail.memory.externalUserId || '-'}</dd>
+            <dt className="text-ink-muted">{t('memory.col.createdAt')}</dt>
+            <dd className="text-ink-secondary">{detail.memory.createTime || '-'}</dd>
+            {detail.memory.memoryType && (
+              <>
+                <dt className="text-ink-muted">{t('memory.col.memoryType')}</dt>
+                <dd className="text-ink-secondary">{t(`graph.type.${detail.memory.memoryType}` as 'graph.type.Other')}</dd>
+              </>
+            )}
+            {detail.memory.profileTemplateId && (
+              <>
+                <dt className="text-ink-muted">{t('memory.col.profileTreeId')}</dt>
+                <dd className="text-ink-secondary break-all">{detail.memory.profileTemplateId}</dd>
+              </>
+            )}
+            {detail.memory.skillName && (
+              <>
+                <dt className="text-ink-muted">{t('memory.col.skillName')}</dt>
+                <dd className="text-ink-secondary break-all">{detail.memory.skillName}</dd>
+              </>
+            )}
+            <dt className="text-ink-muted">{t('memory.detailId')}</dt>
+            <dd className="text-ink-secondary break-all font-mono text-xs">{detail.memory.memoryId}</dd>
+          </dl>
+        )}
       </Dialog>
     </>
   )
