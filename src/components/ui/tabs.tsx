@@ -1,6 +1,7 @@
 import { useId, type ReactNode } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
 import { cn } from '../../lib/utils'
+import { DUR, EASE_OUT_EXPO } from '../../lib/motion'
 
 export interface TabItem<K extends string = string> {
   key: K
@@ -57,7 +58,7 @@ export function Tabs<K extends string>({
               <motion.span
                 layoutId={`tab-${id}`}
                 className="absolute inset-0 rounded-lg border border-line bg-surface shadow-2xs"
-                transition={reduce ? { duration: 0 } : { type: 'spring', stiffness: 420, damping: 34 }}
+                transition={reduce ? { duration: 0 } : { type: 'tween', duration: DUR.base, ease: EASE_OUT_EXPO }}
               />
             )}
             <span className="relative">{item.label}</span>

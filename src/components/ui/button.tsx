@@ -4,10 +4,15 @@ import { cn } from '../../lib/utils'
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'secondary' | 'ghost' | 'outline' | 'destructive'
   size?: 'sm' | 'md' | 'lg' | 'icon'
+  /** 提交中：按钮自动禁用并显示转圈，文字保持不变。
+   *
+   *  不要用「把文案换成『处理中…』」代替——按钮宽度会跟着变，旁边的按钮跟着跳。
+   *  转圈是叠加在文字左边的，宽度只多出 14px，且用户仍然知道自己在等什么。 */
+  loading?: boolean
 }
 
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant = 'secondary', size = 'md', ...props }, ref) => {
+  ({ className, variant = 'secondary', size = 'md', loading = false, disabled, children, ...props }, ref) => {
     const base =
       'inline-flex items-center justify-center gap-1.5 rounded-lg text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/30 disabled:pointer-events-none disabled:opacity-50 cursor-pointer active:scale-[0.98]'
 
@@ -27,7 +32,18 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       icon: 'h-8 w-8 p-0',
     }
 
-    return <button ref={ref} className={cn(base, variants[variant], sizes[size], className)} {...props} />
+    return (
+      <button
+        ref={ref}
+        disabled={loading || disabled}
+        aria-busy={loading || undefined}
+        className={cn(base, variants[variant], sizes[size], className)}
+        {...props}
+      >
+        {loading && <span className="btn-spinner" aria-hidden="true" />}
+        {children}
+      </button>
+    )
   },
 )
 Button.displayName = 'Button'

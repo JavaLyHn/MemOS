@@ -22,7 +22,7 @@ export function Sidebar() {
   const t = useT()
   const str = useStr()
   const { currentProjectId, currentProjectName, projects, setCurrent } = useProject()
-  const { canLogout } = useMeta()
+  const { canLogout, account, realAdmin, previewUser, setPreviewUser } = useMeta()
   const { lang, setLang } = useLang()
   const { pref: themePref, setPref: setThemePref } = useTheme()
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === '1')
@@ -50,6 +50,8 @@ export function Sidebar() {
   }
 
   const currentName = currentProjectName || t('nav.selectProject')
+  const accountName = account?.displayName?.trim() || account?.username || t('nav.account')
+  const accountInitial = (account?.displayName?.trim() || account?.username || '').charAt(0).toUpperCase() || '?'
 
   return (
     <div
@@ -60,9 +62,9 @@ export function Sidebar() {
       }`}
     >
       <div {...S} className={`h-14 shrink-0 flex items-center ${collapsed ? 'justify-center' : 'px-1'}`}>
-        <a {...S} href={LINKS.home} rel="noopener noreferrer" target="_blank" className="flex items-center">
+        <Link {...S} to="/cn/quickstart" className="flex items-center">
           <Logo compact={collapsed} />
-        </a>
+        </Link>
       </div>
 
       <div {...S} className={`w-full shrink-0 mt-3 relative ${collapsed ? 'flex justify-center' : ''}`} ref={pickerRef}>
@@ -97,25 +99,48 @@ export function Sidebar() {
             className="absolute z-50 mt-1 rounded-xl border border-line bg-surface shadow-lg p-1.5 backdrop-blur-md"
             style={collapsed ? { left: 0, top: '100%', width: 220 } : { left: 0, right: 0, top: '100%' }}
           >
-            {projects.length === 0 && <div className="px-3 py-2 text-sm text-ink-faint">{t('nav.noProject')}</div>}
-            {projects.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors flex items-center justify-between ${
-                  currentProjectId === p.id
-                    ? 'bg-accent-soft text-accent font-medium'
-                    : 'text-ink-secondary hover:bg-surface-hover hover:text-ink'
-                }`}
-                onClick={() => {
-                  setCurrent(p.id).catch(() => {})
-                  setPickerOpen(false)
-                }}
+            {projects.filter((p) => !p.disabled).length === 0 && (
+              <div className="px-3 py-2 text-sm text-ink-faint">{t('nav.noProject')}</div>
+            )}
+            {projects
+              .filter((p) => !p.disabled)
+              .map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors flex items-center justify-between ${
+                    currentProjectId === p.id
+                      ? 'bg-accent-soft text-accent font-medium'
+                      : 'text-ink-secondary hover:bg-surface-hover hover:text-ink'
+                  }`}
+                  onClick={() => {
+                    setCurrent(p.id).catch(() => {})
+                    setPickerOpen(false)
+                  }}
+                >
+                  <span className="truncate">{p.name}</span>
+                  {currentProjectId === p.id && <Icon name="i-lucide:check" className="ml-2 size-4 shrink-0 text-accent" />}
+                </button>
+              ))}
+            <div className="my-1 border-t border-line" />
+            <Link
+              to="/cn/projects"
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-secondary transition-colors hover:bg-surface-hover hover:text-ink"
+              onClick={() => setPickerOpen(false)}
+            >
+              <Icon name="i-lucide:users" className="size-4 shrink-0 text-ink-muted" />
+              {t('nav.projects')}
+            </Link>
+            {account?.platformAdmin && (
+              <Link
+                to="/cn/projects?create=1"
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-secondary transition-colors hover:bg-surface-hover hover:text-ink"
+                onClick={() => setPickerOpen(false)}
               >
-                <span className="truncate">{p.name}</span>
-                {currentProjectId === p.id && <Icon name="i-lucide:check" className="ml-2 size-4 shrink-0 text-accent" />}
-              </button>
-            ))}
+                <Icon name="i-lucide:plus" className="size-4 shrink-0 text-ink-muted" />
+                {t('onboarding.create')}
+              </Link>
+            )}
           </div>
         )}
       </div>
@@ -137,12 +162,14 @@ export function Sidebar() {
               <ul className={`space-y-0.5 ${collapsed ? 'flex flex-col items-center' : ''}`}>
                 {group.items.map((item) => {
                   const active = pathname === item.to
-                  /* 还没开放的页（`ComingSoon`）：保持原样显示但置灰不可点击 */
+                  /* 还没开放的页（`ComingSoon`）：保持原样显示但置灰不可点击。
+                     hover 提示要说明**为什么点不动**——只显示页面名字，用户会以为是自己点歪了。 */
                   const off = item.disabled === true
+                  const labelText = str(item.label as TKey)
                   return (
                     <li
                       key={item.to}
-                      title={str(item.label as TKey)}
+                      title={off ? `${labelText} · ${str('common.comingSoon')}` : labelText}
                       style={collapsed ? { width: RAIL_ITEM } : undefined}
                       className={`group rounded-lg border transition-colors duration-150 ${
                         off
@@ -173,7 +200,7 @@ export function Sidebar() {
                             }`}
                           />
                         )}
-                        {!collapsed && <span className="truncate">{str(item.label as TKey)}</span>}
+                        {!collapsed && <span className="truncate">{labelText}</span>}
                       </Link>
                     </li>
                   )
@@ -219,7 +246,7 @@ export function Sidebar() {
           <button
             {...U}
             type="button"
-            title={t('nav.account')}
+            title={accountName}
             aria-expanded={accountOpen}
             onClick={() => setAccountOpen((o) => !o)}
             style={{ width: collapsed ? RAIL_ITEM : undefined }}
@@ -229,9 +256,9 @@ export function Sidebar() {
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="rounded-full size-7 bg-line text-ink-secondary font-semibold text-xs flex items-center justify-center shrink-0 border border-line-strong">
-                G
+                {accountInitial}
               </div>
-              {!collapsed && <div className="truncate text-sm font-medium text-ink-secondary text-left">{t('nav.account')}</div>}
+              {!collapsed && <div className="truncate text-sm font-medium text-ink-secondary text-left">{accountName}</div>}
             </div>
             {!collapsed && (
               <Icon
@@ -247,6 +274,14 @@ export function Sidebar() {
               className="absolute z-50 bottom-full mb-1.5 rounded-xl border border-line bg-surface shadow-lg p-1.5 backdrop-blur-md"
               style={collapsed ? { left: '100%', bottom: 0, marginLeft: 8, width: 160 } : { left: 0, right: 0 }}
             >
+              {account && (
+                <div className="px-3 py-2 border-b border-line mb-1">
+                  <div className="truncate text-sm font-medium text-ink">{accountName}</div>
+                  {account.username && account.username !== accountName && (
+                    <div className="truncate text-xs text-ink-faint">{account.username}</div>
+                  )}
+                </div>
+              )}
               <Link
                 {...U}
                 to={LINKS.about}
@@ -296,6 +331,20 @@ export function Sidebar() {
                   ))}
                 </div>
               </div>
+              {realAdmin && (
+                <button
+                  {...U}
+                  type="button"
+                  className="w-full text-left px-3 py-2 text-sm text-ink-secondary hover:bg-surface-hover hover:text-ink rounded-lg transition-colors border-t border-line mt-1 pt-2 flex items-center justify-between"
+                  onClick={() => {
+                    setPreviewUser(!previewUser)
+                    setAccountOpen(false)
+                  }}
+                >
+                  <span>{t(previewUser ? 'nav.exitPreview' : 'nav.previewUser')}</span>
+                  {previewUser && <span className="text-[11px] font-medium text-warning">ON</span>}
+                </button>
+              )}
               {canLogout && (
                 <button
                   {...U}

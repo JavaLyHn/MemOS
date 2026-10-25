@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { api, type ApiKey } from '../lib/api'
 import { useAsync, usePaged } from '../lib/useAsync'
 import { useProject, useT, useToast, useLang } from '../lib/store'
@@ -17,11 +17,13 @@ import { Input } from '../components/ui/input'
 /** 密钥展示截断：前 7 位 + 7 个星号 + 后 8 位 */
 const mask = (key: string) => (key ? `${key.substring(0, 7)}*******${key.substring(key.length - 8)}` : '')
 
-const createKeySchema = z.object({
-  name: z.string().min(1, '名称不能为空').max(64, '名称最多 64 个字符'),
-})
+/** 校验消息也走字典：硬编码中文在英文界面里会冒出来（AGENTS 第 3 条）。 */
+const makeCreateKeySchema = (t: ReturnType<typeof useT>) =>
+  z.object({
+    name: z.string().min(1, t('apikeys.nameRequired')).max(64, t('apikeys.nameTooLong')),
+  })
 
-type CreateKeyForm = z.infer<typeof createKeySchema>
+type CreateKeyForm = z.infer<ReturnType<typeof makeCreateKeySchema>>
 
 export function ApiKeys() {
   const t = useT()
@@ -38,6 +40,8 @@ export function ApiKeys() {
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<ApiKey | null>(null)
   const [pendingDelete, setPendingDelete] = useState<ApiKey | null>(null)
+  const [renaming, setRenaming] = useState<ApiKey | null>(null)
+  const [renameValue, setRenameValue] = useState('')
 
   const {
     register,
@@ -45,7 +49,7 @@ export function ApiKeys() {
     reset,
     formState: { errors, isSubmitting },
   } = useForm<CreateKeyForm>({
-    resolver: zodResolver(createKeySchema),
+    resolver: zodResolver(useMemo(() => makeCreateKeySchema(t), [t])),
     defaultValues: { name: '' },
   })
 
@@ -55,14 +59,6 @@ export function ApiKeys() {
       toast(t('common.copied'))
     } catch {
       toast(t('common.copyFailed'), 'err')
-    }
-  }
-
-  const copyKey = async (id: string) => {
-    try {
-      copy(await api.keys.copy(id))
-    } catch (e) {
-      toast(errText(lang, e), 'err')
     }
   }
 
@@ -84,7 +80,24 @@ export function ApiKeys() {
     setPendingDelete(null)
     try {
       await api.keys.revoke(target.id)
-      toast(`${t('common.delete')}：${target.keyName}`)
+      toast(t('apikeys.deleted')(target.keyName))
+      reload()
+    } catch (e) {
+      toast(errText(lang, e), 'err')
+    }
+  }
+
+  const doRename = async () => {
+    if (!renaming) return
+    const name = renameValue.trim()
+    if (!name) {
+      toast(t('apikeys.nameRequired'), 'err')
+      return
+    }
+    try {
+      await api.keys.rename(renaming.id, name)
+      setRenaming(null)
+      toast(t('apikeys.renamed'))
       reload()
     } catch (e) {
       toast(errText(lang, e), 'err')
@@ -120,7 +133,18 @@ export function ApiKeys() {
               >
                 {noProject && <StateRow colSpan={4} state="error" error={t('apikeys.noProject')} />}
                 {!noProject && state !== 'ready' && <StateRow colSpan={4} state={state} error={error} />}
-                {!noProject && state === 'ready' && data?.records.length === 0 && <StateRow colSpan={4} state="ready" />}
+                {!noProject && state === 'ready' && data?.records.length === 0 && (
+                  <StateRow
+                    colSpan={4}
+                    state="ready"
+                    emptyTitle={t('apikeys.empty')}
+                    emptyAction={
+                      <PrimaryButton icon="i-lucide:plus" onClick={() => setCreating(true)}>
+                        {t('apikeys.new')}
+                      </PrimaryButton>
+                    }
+                  />
+                )}
                 {!noProject &&
                   state === 'ready' &&
                   data?.records.map((k) => (
@@ -137,7 +161,14 @@ export function ApiKeys() {
                       <td data-pinned="false" className={`${TD}`}>
                         <RowActions
                           actions={[
-                            { label: t('apikeys.copy'), icon: 'i-lucide:copy', onClick: () => copyKey(k.id) },
+                            {
+                              label: t('apikeys.rename'),
+                              icon: 'i-lucide:pencil',
+                              onClick: () => {
+                                setRenameValue(k.keyName)
+                                setRenaming(k)
+                              },
+                            },
                             { label: t('apikeys.delete'), icon: 'i-lucide:trash-2', tone: 'danger', onClick: () => setPendingDelete(k) },
                           ]}
                         />
@@ -163,7 +194,7 @@ export function ApiKeys() {
             <Button type="button" variant="secondary" onClick={() => setCreating(false)}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" variant="primary" disabled={isSubmitting}>
+            <Button type="submit" variant="primary" loading={isSubmitting}>
               {t('common.create')}
             </Button>
           </div>
@@ -191,6 +222,33 @@ export function ApiKeys() {
       </Dialog>
 
       <Dialog
+        open={!!renaming}
+        title={t('apikeys.renameTitle')}
+        onClose={() => setRenaming(null)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setRenaming(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button variant="primary" onClick={doRename}>
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-1.5">
+          <label className="block text-sm font-medium text-ink-secondary">{t('apikeys.dialog.name')}</label>
+          <Input
+            autoFocus
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            placeholder={t('apikeys.dialog.namePlaceholder')}
+          />
+          <p className="text-xs text-ink-muted">{t('apikeys.renameHint')}</p>
+        </div>
+      </Dialog>
+
+      <Dialog
         open={!!pendingDelete}
         title={t('apikeys.deleteApikey')}
         onClose={() => setPendingDelete(null)}
@@ -200,7 +258,7 @@ export function ApiKeys() {
               {t('common.cancel')}
             </Button>
             <Button variant="destructive" onClick={doDelete}>
-              {t('common.confirm')}
+              {t('common.delete')}
             </Button>
           </>
         }

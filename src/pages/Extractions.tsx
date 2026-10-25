@@ -183,7 +183,7 @@ export function Extractions() {
                         <Icon name="i-lucide:sparkles" className="shrink-0 size-3.5" />
                         {t('extraction.aiRewrite')}
                       </Button>
-                      <Button variant="ghost" size="sm" disabled={busy} onClick={resetDefault}>
+                      <Button variant="ghost" size="sm" loading={busy} onClick={resetDefault}>
                         {t('extraction.resetDefault')}
                       </Button>
                     </div>
@@ -198,7 +198,7 @@ export function Extractions() {
                       >
                         {t('extraction.cancel')}
                       </Button>
-                      <Button variant="primary" size="sm" disabled={busy || !dirty} onClick={save}>
+                      <Button variant="primary" size="sm" loading={busy} disabled={!dirty} onClick={save}>
                         {t('extraction.saveEdit')}
                       </Button>
                     </div>
@@ -223,7 +223,7 @@ export function Extractions() {
                   >
                     {t('extraction.restoreSample')}
                   </Button>
-                  <Button variant="primary" size="sm" disabled={busy || !currentProjectId} onClick={debug}>
+                  <Button variant="primary" size="sm" loading={busy} disabled={!currentProjectId} onClick={debug}>
                     <Icon name="i-lucide:play" className="shrink-0 size-3.5" />
                     {t('extraction.debugRun')}
                   </Button>
@@ -295,7 +295,7 @@ export function Extractions() {
               <Button variant="secondary" onClick={() => setAiOpen(false)}>
                 {t('common.cancel')}
               </Button>
-              <Button variant="primary" disabled={busy || !aiAsk.trim()} onClick={aiRewrite}>
+              <Button variant="primary" loading={busy} disabled={!aiAsk.trim()} onClick={aiRewrite}>
                 {t('extraction.aiSubmit')}
               </Button>
             </>

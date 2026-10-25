@@ -1,6 +1,6 @@
 /** 用量监控。
  *
- *  数据来自 BFF 从调用日志聚合出的 `/api/dashboard/usage/query`。
+ *  数据来自后端从调用审计聚合出的 `/api/dashboard/usage/query`。
  *
  *  ⚠️ 页面上**只呈现真的有的东西**。上游日志实测只记 `addMessage` / `searchMemory` 的
  *  调用次数；`chat` / `extractMemory` / `rerank` 的对象虽然在响应里，但里面**只有恒为 0
@@ -47,7 +47,9 @@ const toPoint = (d: UsageDailyStat): DayPoint => {
   return { date: d.date, write, read, total: write + read }
 }
 
-const ymd = (d: Date) => d.toISOString().slice(0, 10)
+// 后端按北京时间切天，展示口径也用 UTC+8；不能用 toISOString 的 UTC 日期，
+// 否则北京时间 0–8 点之间会落到前一天。
+const ymd = (d: Date) => new Date(d.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10)
 
 /** 纵轴刻度：把最大值抬到一个「整」的刻度上（步长只取 1/2/2.5/5/10 × 10ⁿ）。
  *  直接除以 4 会得到 149.75 这种刻度，读不出来。 */

@@ -1,7 +1,7 @@
 /** 模型列表。
  *
- *  ⚠️ 这一页**读的是上游 Pod 真正在读的那份配置**（BFF `GET /api/dashboard/models`
- *  → ConfigMap `memos-original-api`），不是前端维护的静态副本。
+ *  ⚠️ 这一页**读的是上游 Pod 真正在读的那份配置**（后端 `GET /api/dashboard/models`
+ *  → 上游 `/product/models`），不是前端维护的静态副本。
  *
  *  2026-10-19 之前它读 `public/tech-config/*.json`，那是一份**手写的假清单**：
  *  模型名是编的（`memory-writer` / `embedding-jina-v5` / `rerank-gte` / `deepseek-v3` /
@@ -46,7 +46,7 @@ export function Models() {
       await copyText(text)
       toast(t('common.copied'))
     } catch {
-      // ⚠️ 不写「请求失败」：这里根本没发请求。控制台跑在 `http://<内网 IP>:8280`，
+      // ⚠️ 不写「请求失败」：这里根本没发请求。控制台跑在 `http://<主机 IP>:8280`，
       //    不是 secure context，`navigator.clipboard` 是 undefined，锅在浏览器。
       toast(t('common.copyFailed'), 'err')
     }

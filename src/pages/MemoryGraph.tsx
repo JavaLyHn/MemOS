@@ -1,7 +1,7 @@
 /** 记忆星座图页面。
  *
- *  数据来自 BFF 的 `GET /api/dashboard/graph/memories`（Neo4j，不是上游 REST——
- *  上游没有任何返回「记忆之间关系」的接口）。画布在 components/Constellation.tsx。
+ *  数据来自后端的 `GET /api/dashboard/graph/memories`（上游 `/product/get_memory_graph`），
+ *  画布在 components/Constellation.tsx。
  *
  *  ⚠️ 画布**走亮色**，跟控制台其余页面同一套。2026-10-19 之前它是固定深色
  *  （#070b16 星空底），理由是「星图这个隐喻在亮底上不成立」——那个判断是错的：
@@ -21,6 +21,22 @@ import { BTN_DIALOG_SECONDARY, BTN_PAGER, BTN_TEXT_LINK } from '../lib/cls'
 import { Icon } from '../components/Icon'
 
 const fmtTime = (iso: string) => (iso ? iso.slice(0, 19).replace('T', ' ') : '-')
+
+/** 加载态里那几颗「正在长出来的星」。位置避开正中，给转圈和文字留出空间。 */
+const SKELETON_DOTS = [
+  { x: 22, y: 24, size: 10, delay: 0 },
+  { x: 31, y: 38, size: 7, delay: 180 },
+  { x: 18, y: 52, size: 12, delay: 360 },
+  { x: 38, y: 66, size: 8, delay: 120 },
+  { x: 55, y: 20, size: 9, delay: 300 },
+  { x: 68, y: 30, size: 6, delay: 60 },
+  { x: 62, y: 50, size: 11, delay: 420 },
+  { x: 74, y: 62, size: 8, delay: 240 },
+  { x: 26, y: 76, size: 6, delay: 480 },
+  { x: 47, y: 80, size: 9, delay: 200 },
+  { x: 83, y: 44, size: 7, delay: 340 },
+  { x: 78, y: 74, size: 10, delay: 90 },
+]
 
 export function MemoryGraph() {
   const t = useT()
@@ -64,7 +80,7 @@ export function MemoryGraph() {
 
   /** 抽屉里正文的**展开态**。
    *
-   *  图谱接口为了体积只给截断到 120 字的 `label`（见 BFF `mappers/graph.ts`），
+   *  图谱接口为了体积只给截断到 120 字的 `label`（后端在返回前截断），
    *  长记忆在抽屉里看起来就是「被截断了」。展开时才去取全文——
    *  不展开不发这次请求（用户 2026-10-19 报的：「记忆详情，记忆被截断了」）。
    *
@@ -119,7 +135,20 @@ export function MemoryGraph() {
           {state === 'ready' && data && data.nodes.length > 0 && <Constellation graph={data} onSelect={onSelect} selectedId={selected} />}
 
           {state === 'loading' && (
-            <div className="absolute inset-0 flex items-center justify-center bg-surface text-sm text-ink-muted">{t('common.loading')}</div>
+            <div className="graph-skeleton" aria-busy="true" aria-label={t('common.loading')}>
+              {/* 星点位置写死：这一屏要表达「图正在长出来」，用随机位置反而每帧都在跳。 */}
+              {SKELETON_DOTS.map((d, i) => (
+                <span
+                  key={i}
+                  className="graph-skeleton__dot"
+                  style={{ left: `${d.x}%`, top: `${d.y}%`, width: d.size, height: d.size, animationDelay: `${d.delay}ms` }}
+                />
+              ))}
+              <div className="graph-skeleton__label">
+                <span className="graph-spinner" aria-hidden="true" />
+                <span>{t('common.loading')}</span>
+              </div>
+            </div>
           )}
 
           {state === 'error' && (

@@ -40,6 +40,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     title: 'group.设置',
     items: [
+      { label: 'nav.projects', to: '/cn/projects', icon: 'i-db-project' },
       { label: 'nav.profileTemplate', to: '/cn/profileTemplate', icon: 'i-db-project', iconActive: 'i-db-project-fill', disabled: true },
       { label: 'nav.customExtraction', to: '/cn/customExtraction', icon: 'i-db-skill', iconActive: 'i-db-skill-fill' },
       { label: 'nav.usage', to: '/cn/usage', icon: 'i-db-chart' },

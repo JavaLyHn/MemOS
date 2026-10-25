@@ -12,8 +12,15 @@ export type AsyncState = 'loading' | 'ready' | 'error'
  *    - 自动具备跨页面缓存、并发请求去重与后台静默刷新
  *    - 保留原先对外的简洁接口 { data, state, error, reload }，现有页面零负担升级
  *
- *  `skip` 为真时 query disabled，状态保持 loading 直到 ready。 */
-export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], { skip = false }: { skip?: boolean } = {}) {
+ *  `skip` 为真时 query disabled，状态保持 loading 直到 ready。
+ *
+ *  `refetchInterval` 给需要「自己会刷新」的页面用（目前只有接口文档页的服务状态灯）：
+ *  不传就不轮询。切到后台标签页时 TanStack Query 默认会暂停轮询，回来再补一次。 */
+export function useAsync<T>(
+  fn: () => Promise<T>,
+  deps: unknown[],
+  { skip = false, key, refetchInterval }: { skip?: boolean; key?: string; refetchInterval?: number } = {},
+) {
   const { lang } = useLang()
 
   const {
@@ -22,9 +29,10 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], { skip = fals
     error,
     refetch,
   } = useQuery<T, unknown>({
-    queryKey: ['useAsync', ...deps],
+    queryKey: key ? ['useAsync', key, ...deps] : ['useAsync', ...deps],
     queryFn: fn,
     enabled: !skip,
+    refetchInterval,
     // status 0 是 fetch 层失败（`api.ts` 里标出来的），说明 BFF 正在重启：
     // 重试 6 次、退避到 8 秒，总共约 30 秒，覆盖 Recreate 部署的空窗期。
     // HTTP 4xx/5xx 不重试——重试不会让它变好，只会把错误提示推迟半分钟。

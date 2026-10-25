@@ -2,11 +2,12 @@ import { useState } from 'react'
 import { api, EVENT_TYPES, type LogDetail, type RequestLog } from '../lib/api'
 import { ListPage } from '../components/ListPage'
 import { Dialog, Tag } from '../components/ui'
+import { DetailError, DetailSkeleton } from '../components/ui/detail'
 import { Tabs } from '../components/ui/tabs'
 import { RowActions } from '../components/ui/row-actions'
 import { FilterDateRange, FilterField, FilterFieldRow, FilterInput, FilterPopover, FilterSelect } from '../components/FilterPopover'
 import { FILTER_LABEL } from '../lib/cls'
-import { useLang, useProject, useToast, useT } from '../lib/store'
+import { useLang, useProject, useT } from '../lib/store'
 import { errText } from '../lib/i18n'
 
 /** extractMemoryDirect 展示成 extractMemory */
@@ -28,6 +29,8 @@ function pretty(raw?: string) {
 }
 
 interface LogFilters {
+  /** all = 记忆调用 + 控制台操作；console 下事件类型过滤不适用 */
+  scope: 'all' | 'gateway' | 'console'
   eventType: string
   subjectType: string
   subjectId: string
@@ -35,32 +38,29 @@ interface LogFilters {
   endTime: string
 }
 
-const NO_FILTER: LogFilters = { eventType: '', subjectType: '', subjectId: '', startTime: '', endTime: '' }
+const NO_FILTER: LogFilters = { scope: 'all', eventType: '', subjectType: '', subjectId: '', startTime: '', endTime: '' }
 
 export function Requests() {
   const t = useT()
   const { lang } = useLang()
-  const toast = useToast()
   const { currentProjectId, ready } = useProject()
   const [filters, setFilters] = useState<LogFilters>(NO_FILTER)
   const [draft, setDraft] = useState<LogFilters>(NO_FILTER)
-  const [detail, setDetail] = useState<LogDetail | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [detail, setDetail] = useState<{ id: string; loading: boolean; error: string; data: LogDetail | null } | null>(null)
   const [tab, setTab] = useState<'request' | 'response'>('request')
 
   const patch = (p: Partial<LogFilters>) => setDraft((d) => ({ ...d, ...p }))
 
-  const openDetail = async (row: RequestLog) => {
-    setLoading(true)
-    setDetail(null)
+  const openDetail = async (id: string) => {
+    setDetail({ id, loading: true, error: '', data: null })
     try {
-      setDetail(await api.log.detail(row.id))
+      setDetail({ id, loading: false, error: '', data: await api.log.detail(id) })
     } catch (e) {
       // 取详情失败就明确报错。原来会退化成「用列表行 + 空正文」渲染，
       // 看起来像这次调用本来就没有请求体，排障时会往错误的方向查。
-      toast(errText(lang, e), 'err')
-    } finally {
-      setLoading(false)
+      // 错误只放在弹窗里（带重试），不再额外弹 toast——同一个错误说两遍，
+      // 而且 toast 会在用户读到之前就消失。
+      setDetail({ id, loading: false, error: errText(lang, e), data: null })
     }
   }
 
@@ -74,7 +74,7 @@ export function Requests() {
         rowKey={(r) => r.id}
         deps={[currentProjectId, filters]}
         skip={!ready}
-        onRowClick={openDetail}
+        onRowClick={(r) => openDetail(r.id)}
         filter={(close) => (
           <FilterPopover
             open
@@ -87,6 +87,19 @@ export function Requests() {
               setFilters(NO_FILTER)
             }}
           >
+            <FilterField label={t('filter.logScope')}>
+              <FilterSelect
+                value={draft.scope}
+                onChange={(scope) => patch({ scope: scope as LogFilters['scope'], ...(scope === 'console' ? { eventType: '' } : {}) })}
+                placeholder={t('filter.logScopeAll')}
+                options={[
+                  { value: 'all', label: t('filter.logScopeAll') },
+                  { value: 'gateway', label: t('filter.logScopeGateway') },
+                  { value: 'console', label: t('filter.logScopeConsole') },
+                ]}
+              />
+            </FilterField>
+
             <FilterField label={t('filter.createdAt')}>
               <FilterDateRange
                 start={draft.startTime}
@@ -118,14 +131,16 @@ export function Requests() {
               </div>
             </FilterFieldRow>
 
-            <FilterField label={t('filter.eventType')}>
-              <FilterSelect
-                value={draft.eventType}
-                onChange={(eventType) => patch({ eventType })}
-                placeholder={t('filter.selectEventType')}
-                options={EVENT_TYPES.map((x) => ({ value: x, label: x }))}
-              />
-            </FilterField>
+            {draft.scope !== 'console' && (
+              <FilterField label={t('filter.eventType')}>
+                <FilterSelect
+                  value={draft.eventType}
+                  onChange={(eventType) => patch({ eventType })}
+                  placeholder={t('filter.selectEventType')}
+                  options={EVENT_TYPES.map((x) => ({ value: x, label: x }))}
+                />
+              </FilterField>
+            )}
           </FilterPopover>
         )}
         load={async (pageNum, pageSize, query) => {
@@ -134,6 +149,7 @@ export function Requests() {
             pageNum,
             pageSize,
             query,
+            scope: filters.scope,
             eventType: filters.eventType,
             subjectType: filters.subjectType,
             subjectId: filters.subjectId,
@@ -167,32 +183,36 @@ export function Requests() {
             key: 'action',
             label: t('requests.col.action'),
             render: (r) => (
-              <RowActions actions={[{ label: t('requests.viewDetails'), icon: 'i-lucide:eye', onClick: () => openDetail(r) }]} />
+              <RowActions actions={[{ label: t('requests.viewDetails'), icon: 'i-lucide:eye', onClick: () => openDetail(r.id) }]} />
             ),
           },
         ]}
       />
 
-      <Dialog open={loading || !!detail} title={t('requests.detail.title')} onClose={() => setDetail(null)}>
-        {loading && <p className="text-ink-muted">{t('common.loading')}</p>}
-        {detail && (
+      <Dialog open={!!detail} size="lg" title={t('requests.detail.title')} onClose={() => setDetail(null)}>
+        {detail?.loading && <DetailSkeleton rows={6} />}
+        {detail?.error && <DetailError text={detail.error} onRetry={() => openDetail(detail.id)} />}
+        {detail?.data && (
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
               {(
                 [
-                  ['traceId', detail.traceId],
-                  ['status', detail.status],
-                  ['duration', detail.duration != null ? `${detail.duration}ms` : ''],
-                  ['createTime', detail.createTime],
-                  ['userId', detail.userId],
-                  ['agentId', detail.agentId],
-                  ['requestTokens', detail.requestTokens],
-                  ['responseTokens', detail.responseTokens],
+                  [t('requests.detail.traceId'), detail.data.traceId],
+                  [t('requests.detail.callId'), detail.data.callId],
+                  [t('requests.detail.requestId'), detail.data.requestId],
+                  [t('requests.col.status'), detail.data.status],
+                  [t('requests.col.latency'), detail.data.duration != null ? `${detail.data.duration}ms` : ''],
+                  [t('requests.col.createdAt'), detail.data.createTime],
+                  [t('requests.col.userId'), detail.data.userId],
+                  [t('requests.col.agentId'), detail.data.agentId],
+                  [t('requests.detail.requestTokens'), detail.data.requestTokens],
+                  [t('requests.detail.responseTokens'), detail.data.responseTokens],
+                  [t('requests.detail.llmCalls'), detail.data.llmCalls],
                 ] as const
-              ).map(([k, v]) => (
-                <div key={k} className="flex gap-2">
-                  <span className="w-[120px] shrink-0 text-ink-muted">{k}</span>
-                  <span className="min-w-0 break-all text-ink-secondary">{v ?? '-'}</span>
+              ).map(([label, value]) => (
+                <div key={label} className="flex gap-2">
+                  <span className="w-[120px] shrink-0 text-ink-muted">{label}</span>
+                  <span className="min-w-0 break-all text-ink-secondary">{value ?? '-'}</span>
                 </div>
               ))}
             </div>
@@ -208,7 +228,7 @@ export function Requests() {
             />
 
             <pre className="max-h-[320px] overflow-auto rounded-lg border border-line bg-surface-muted p-3 font-mono text-xs text-ink whitespace-pre-wrap break-all">
-              {pretty(tab === 'request' ? detail.requestBody : detail.responseBody)}
+              {pretty(tab === 'request' ? detail.data.requestBody : detail.data.responseBody)}
             </pre>
           </div>
         )}

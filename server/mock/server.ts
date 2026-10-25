@@ -33,7 +33,7 @@ function fail(res: http.ServerResponse, code: number, message: string, status = 
 function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve) => {
     // ⚠️ 按字节攒、最后一次性按 UTF-8 解码：`raw += chunk` 会让每个分片各自解码，
-    //    汉字跨分片时会变成 U+FFFD（同样的写法在 BFF 里已经造成过一次真实的静默损坏）
+    //    汉字跨分片时会变成 U+FFFD（同样的写法在旧实现里已经造成过一次真实的静默损坏）
     const chunks: Buffer[] = []
     req.on('data', (c: Buffer) => chunks.push(c))
     req.on('end', () => {

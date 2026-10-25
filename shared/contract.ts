@@ -1,7 +1,7 @@
 /** 前后端共用的接口契约。
  *
- *  这里是**唯一**的字段定义处：前端 `src/lib/api.ts` 直接再导出这些类型，BFF 的
- *  adapter / mapper / store 也从这里取。以前两边各写一份（`RequestLog` vs
+ *  这里是**唯一**的字段定义处：前端 `src/lib/api.ts` 直接再导出这些类型，后端
+ *  按同一形状实现。以前两边各写一份（`RequestLog` vs
  *  `ConsoleLogRow`、`MemoryGraph` 两处、`ModelRecord` 两处），改一边忘另一边时
  *  TypeScript 不会报错，只有页面上少一列才看得出来。
  *
@@ -28,6 +28,68 @@ export interface Project {
   status?: string
   createTime?: string
   isMultiView?: number
+  /** 当前账号在这个项目里的角色；项目列表接口才带 */
+  role?: string
+  /** 项目已被管理员停用；和「不是当前项目」的 status=DISABLED 不是一件事 */
+  disabled?: boolean
+  /** personal 是账号的个人空间，team 是普通项目 */
+  kind?: 'team' | 'personal'
+  /** 已归档（软删除）；项目列表接口会带出，可恢复 */
+  archived?: boolean
+  archivedAt?: string
+}
+
+/* ------------------------------------------------------------ 账号与成员 */
+
+export interface AdminAccount {
+  id: string
+  username: string
+  display_name: string
+  email?: string
+  platform_admin: boolean
+  disabled: boolean
+  created_at: string
+  last_login_at?: string
+}
+
+export interface ProjectMember {
+  account_id: string
+  username: string
+  display_name: string
+  disabled: boolean
+  role: string
+  created_at: string
+}
+
+/** `@` 搜索的可加入候选；member 表示已在项目里 */
+export interface MemberCandidate {
+  accountId: string
+  username: string
+  displayName: string
+  disabled: boolean
+  member: boolean
+}
+
+/** 项目邀请链接。明文 token 只在创建响应里出现一次（path），列表不含 token */
+export interface ProjectInvite {
+  id: string
+  tenantId: string
+  role: string
+  status: 'active' | 'used' | 'expired' | 'revoked'
+  createdAt: string
+  expiresAt: string
+  usedAt?: string
+  usedByAccountId?: string
+  revokedAt?: string
+}
+
+export interface CreatedInvite {
+  id: string
+  tenantId: string
+  role: string
+  path: string
+  createdAt: string
+  expiresAt: string
 }
 
 /* ------------------------------------------------------------ 密钥 */
@@ -45,6 +107,8 @@ export interface ApiKey {
 /** 调用日志列表行 */
 export interface RequestLog {
   id: string
+  /** 异步 add 的请求行与后台终态行的关联 ID；同步/历史行为空 */
+  callId?: string
   createTime: string
   /** 事件类型，见前端 `EVENT_TYPES` */
   eventType: string
@@ -61,12 +125,15 @@ export interface RequestLog {
 /** 调用日志详情。`requestBody` / `responseBody` 是 JSON 字符串，前端要二次 parse */
 export interface LogDetail extends Omit<RequestLog, 'userIds' | 'agentIds'> {
   traceId?: string
+  requestId?: string
   userId?: string
   agentId?: string
   requestCode?: number
   responseCode?: number
   requestBody?: string
   responseBody?: string
+  /** 上游 add 回报的 LLM 调用次数；没有回报时不下发 */
+  llmCalls?: number
 }
 
 /* ------------------------------------------------------------ 记忆 */
@@ -96,6 +163,23 @@ export interface KnowledgeBase {
   knowledgebaseName: string
   knowledgebaseDescription?: string
   projectIds?: string[]
+  fileCount?: number
+  totalSize?: number
+  createTime?: string
+  updateTime?: string
+}
+
+/** 知识库文件条目（上游 public_file_view 的投影） */
+export interface KnowledgeFile {
+  id: string
+  fileId: string
+  knowledgebaseId: string
+  name: string
+  type?: string
+  status?: string
+  size: number
+  sizeMB?: number
+  createTime?: string
 }
 
 /* ------------------------------------------------------------ 画像模板 */
@@ -138,8 +222,19 @@ export interface Meta {
   tools: ToolInfo[]
   /** 鉴权是否生效。**不是**给人看的文案（那是 `auth`），是给程序判断用的 */
   authEnabled?: boolean
-  /** `page` = 服务端登录页 + 会话 cookie（能登出）；`basic` = HTTP Basic（浏览器自己缓存凭据） */
-  authMode?: 'page' | 'basic'
+  /** `page` = 控制台登录页；`basic` = HTTP Basic；`external` = 零信任网关注入身份 */
+  authMode?: 'page' | 'basic' | 'external'
+}
+
+/** 当前登录主体（`/api/auth/me`） */
+export interface Account {
+  /** 账号 ID；管理 Token 没有账号身份时为空 */
+  accountId?: string
+  username: string
+  displayName: string
+  platformAdmin: boolean
+  currentProjectId: string
+  projects: { id: string; name: string; role: string; kind?: 'team' | 'personal' }[]
 }
 
 /* ------------------------------------------------------------ 模型 */

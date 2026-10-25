@@ -1,6 +1,6 @@
 /** 复制到剪贴板。
  *
- *  ⚠️ **必须有 `execCommand` 兜底**：控制台的部署形态是 `http://<内网 IP>:8280`，
+ *  ⚠️ **必须有 `execCommand` 兜底**：控制台以 `http://<主机 IP>:8280` 部署时，
  *  它不是 secure context，而 `navigator.clipboard` 只在 secure context（https / localhost）
  *  上存在——在部署实例上它是 **`undefined`**（2026-10-19 实测
  *  `isSecureContext=false`、`typeof navigator.clipboard === 'undefined'`）。

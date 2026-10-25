@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from 'react'
 import { useAsync, usePaged } from '../lib/useAsync'
 import { Pager, Panel, PageHeader, SearchBox, StateRow, Table, TD, TD_BREAK, Th } from './ui'
+import { Button } from './ui/button'
+import { useT } from '../lib/store'
 
 export interface Col<T> {
   key: string
@@ -55,8 +57,9 @@ export function ListPage<T>({
   skip?: boolean
 }) {
   const pg = usePaged(10)
+  const t = useT()
   const [filterOpen, setFilterOpen] = useState(false)
-  const { data, state, error } = useAsync(() => load(pg.page, pg.pageSize, pg.q), [pg.page, pg.pageSize, pg.q, ...deps], { skip })
+  const { data, state, error, reload } = useAsync(() => load(pg.page, pg.pageSize, pg.q), [pg.page, pg.pageSize, pg.q, ...deps], { skip })
 
   return (
     <>
@@ -71,6 +74,7 @@ export function ListPage<T>({
                 onChange={pg.setDraft}
                 onSubmit={pg.submit}
                 onFilter={filter ? () => setFilterOpen((o) => !o) : undefined}
+                onFilterClose={filter ? () => setFilterOpen(false) : undefined}
                 filterOpen={filterOpen}
                 filter={filter ? filter(() => setFilterOpen(false)) : undefined}
                 placeholder={searchPlaceholder}
@@ -94,15 +98,42 @@ export function ListPage<T>({
                   </>
                 }
               >
-                {state !== 'ready' && <StateRow colSpan={cols.length} state={state} error={error} />}
-                {state === 'ready' && data?.items.length === 0 && <StateRow colSpan={cols.length} state="ready" />}
+                {state !== 'ready' && <StateRow colSpan={cols.length} state={state} error={error} onRetry={reload} />}
+                {state === 'ready' && data?.items.length === 0 && (
+                  <StateRow
+                    colSpan={cols.length}
+                    state="ready"
+                    emptyTitle={pg.q ? t('common.noMatch') : undefined}
+                    emptyAction={
+                      pg.q ? (
+                        <Button size="sm" variant="secondary" onClick={pg.reset}>
+                          {t('common.clearSearch')}
+                        </Button>
+                      ) : undefined
+                    }
+                  />
+                )}
                 {state === 'ready' &&
                   data?.items.map((row) => (
                     <tr
                       key={rowKey(row)}
                       data-selectable="true"
-                      className={`data-[selected=true]:bg-elevated/50 ${onRowClick ? 'cursor-pointer' : ''}`}
+                      tabIndex={onRowClick ? 0 : undefined}
                       onClick={onRowClick ? () => onRowClick(row) : undefined}
+                      onKeyDown={
+                        onRowClick
+                          ? (e) => {
+                              // 行内还有按钮（如「查看详情」）。焦点在按钮上时把按键交给按钮，
+                              // 否则回车会被行和按钮各触发一次。
+                              if (e.target !== e.currentTarget) return
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                onRowClick(row)
+                              }
+                            }
+                          : undefined
+                      }
+                      className={`data-[selected=true]:bg-elevated/50 ${onRowClick ? 'cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40' : ''}`}
                     >
                       {cols.map((c) => (
                         <td key={c.key} data-pinned="false" className={c.wrap ? TD_BREAK : TD}>

@@ -40,6 +40,16 @@ export interface ParamEntries {
   'common.total': (n: number) => string
   'common.pageOf': (page: number, pages: number) => string
   'apikeys.confirmDelete': (name: string) => string
+  'apikeys.deleted': (name: string) => string
+  'projects.member.confirmRemove': (name: string) => string
+  'projects.invite.days': (days: string) => string
+  'users.assignDesc': (name: string) => string
+  'users.assigned': (user: string, project: string) => string
+  'users.confirmDisable': (name: string) => string
+  'projects.deleteConfirm': (name: string) => string
+  'kb.deleteConfirm': (name: string) => string
+  'users.deleteConfirm': (name: string) => string
+  'projects.disableConfirm': (name: string) => string
   'memory.deleteConfirm': (n: number) => string
   'memory.deleteDone': (n: number) => string
   'usage.kpi.rangeHint': (d: number) => string

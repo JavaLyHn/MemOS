@@ -143,10 +143,7 @@ export function buildTabs(facts: ServiceFacts): AccessTab[] {
         {
           n: '2',
           title: bi('一条命令接入', 'One command'),
-          desc: bi(
-            '回车后它会问是否需要鉴权：回答是，再把密钥粘进去（存进 ~/.hermes/.env）',
-            'It then asks whether the server needs auth: say yes and paste the key (saved to ~/.hermes/.env)',
-          ),
+          desc: bi('按提示确认鉴权，再粘贴密钥。', 'Confirm auth when prompted, then paste the key.'),
           code: hermesCmd,
           multiline: true,
         },

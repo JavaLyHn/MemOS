@@ -1,7 +1,9 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { Icon } from './Icon'
 import { EmptyState } from './ui/empty-state'
+import { Skeleton } from './ui/skeleton'
+import { Button } from './ui/button'
 import { useT } from '../lib/store'
 
 /** 标签的展示色。成功 / 失败两种，另留一档中性色 */
@@ -95,13 +97,29 @@ export function ComingSoon() {
 }
 
 /** 加载 / 空 / 出错三种状态的整行占位 */
-export function StateRow({ colSpan, state, error }: { colSpan: number; state: 'loading' | 'ready' | 'error'; error?: string }) {
+export function StateRow({
+  colSpan,
+  state,
+  error,
+  onRetry,
+  emptyTitle,
+  emptyAction,
+}: {
+  colSpan: number
+  state: 'loading' | 'ready' | 'error'
+  error?: string
+  /** 失败态的重试。列表加载失败原来只能整页刷新，等于把筛选条件和页码一起丢掉 */
+  onRetry?: () => void
+  /** 空列表时换一句话。搜索无结果和「这个项目本来就没数据」是两件事 */
+  emptyTitle?: string
+  emptyAction?: ReactNode
+}) {
   const t = useT()
   if (state === 'ready') {
     return (
       <tr>
         <td colSpan={colSpan}>
-          <EmptyState compact title={t('common.noData')} />
+          <EmptyState compact title={emptyTitle ?? t('common.noData')} action={emptyAction} />
         </td>
       </tr>
     )
@@ -113,11 +131,11 @@ export function StateRow({ colSpan, state, error }: { colSpan: number; state: 'l
           <tr key={idx} className="border-b border-line">
             <td colSpan={colSpan} className="px-4 py-3.5">
               <div className="flex items-center gap-4">
-                <div className="h-4 w-4 rounded bg-line/60 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent shrink-0" />
-                <div className="h-4 w-28 rounded bg-line/60 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent" />
-                <div className="h-4 w-40 rounded bg-line/50 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent" />
-                <div className="h-4 flex-1 rounded bg-line/40 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent" />
-                <div className="h-4 w-16 rounded bg-line/60 relative overflow-hidden after:absolute after:inset-0 after:-translate-x-full after:animate-[shimmer_1.6s_infinite] after:bg-gradient-to-r after:from-transparent after:via-ink-faint/20 after:to-transparent shrink-0" />
+                <Skeleton className="size-4 shrink-0" />
+                <Skeleton className="h-4 w-28" />
+                <Skeleton className="h-4 w-40" />
+                <Skeleton className="h-4 flex-1" />
+                <Skeleton className="h-4 w-16 shrink-0" />
               </div>
             </td>
           </tr>
@@ -131,7 +149,18 @@ export function StateRow({ colSpan, state, error }: { colSpan: number; state: 'l
     <tr>
       <td colSpan={colSpan}>
         {/* 失败态用 warning 色图标 + 正文色文字：错误原文要能读清，而不是一行灰字 */}
-        <EmptyState compact icon="i-lucide:alert-circle" title={text} />
+        <EmptyState
+          compact
+          icon="i-lucide:alert-circle"
+          title={text}
+          action={
+            onRetry ? (
+              <Button variant="secondary" onClick={onRetry}>
+                {t('common.retry')}
+              </Button>
+            ) : undefined
+          }
+        />
       </td>
     </tr>
   )
@@ -209,20 +238,27 @@ export function Pager({ page, pageSize, total, onPage }: { page: number; pageSiz
   )
 }
 
-/** 对话框。采用 Radix UI Dialog 原语，自带 Portal、Focus Trap 与 Escape 键无障碍支持 */
+/** 对话框。采用 Radix UI Dialog 原语，自带 Portal、Focus Trap 与 Escape 键无障碍支持
+ *
+ *  `size` 决定最大宽度：确认类弹窗（md，默认）一句话就够；详情类弹窗内容长，
+ *  用 lg 才不用每行都折。宽度上限用的是编译产物里已有的 `max-w-*`，别换成任意值类。 */
 export function Dialog({
   open,
   title,
   onClose,
   children,
   footer,
+  size = 'md',
 }: {
   open: boolean
   title: string
   onClose: () => void
   children: ReactNode
   footer?: ReactNode
+  size?: 'sm' | 'md' | 'lg'
 }) {
+  const t = useT()
+  const width = size === 'lg' ? 'max-w-2xl' : size === 'sm' ? 'max-w-md' : 'max-w-lg'
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogPrimitive.Portal>
@@ -232,13 +268,15 @@ export function Dialog({
             v4 把位移拆成了独立属性，两处同时写会叠加成双倍平移。
             原来的 `scale-in` 则相反：只写 `transform: scale()`，把位移覆盖掉了。
             见 console-extra.css 的 `dialog-in` / `dialog-out`。 */}
-        <DialogPrimitive.Content className="fixed z-50 bg-surface border border-line flex flex-col focus:outline-none data-[state=open]:animate-[dialog-in_190ms_cubic-bezier(0.16,1,0.3,1)] data-[state=closed]:animate-[dialog-out_140ms_ease-in] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[calc(100vw-2rem)] max-w-lg max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-4rem)] shadow-2xl overflow-hidden rounded-2xl">
+        <DialogPrimitive.Content
+          className={`fixed z-50 bg-surface border border-line flex flex-col focus:outline-none data-[state=open]:animate-[dialog-in_190ms_cubic-bezier(0.16,1,0.3,1)] data-[state=closed]:animate-[dialog-out_140ms_ease-in] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[calc(100vw-2rem)] ${width} max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-4rem)] shadow-2xl overflow-hidden rounded-2xl`}
+        >
           <div className="flex items-center justify-between px-6 py-4.5 min-h-16 border-b border-line">
             <DialogPrimitive.Title className="text-base font-semibold text-ink leading-6">{title}</DialogPrimitive.Title>
             <DialogPrimitive.Close asChild>
               <button
                 type="button"
-                aria-label="Close"
+                aria-label={t('common.close')}
                 className="p-1 rounded-lg text-ink-faint hover:text-ink-secondary hover:bg-surface-hover transition-colors cursor-pointer"
               >
                 <Icon name="i-lucide:x" className="shrink-0 size-4.5" />
@@ -297,6 +335,7 @@ export function SearchBox({
   onChange,
   onSubmit,
   onFilter,
+  onFilterClose,
   filterOpen = false,
   filter,
   placeholder,
@@ -305,14 +344,37 @@ export function SearchBox({
   onChange: (v: string) => void
   onSubmit: () => void
   onFilter?: () => void
+  /** 点浮层外面或按 Esc 时收起。
+   *
+   *  原来只能再点一次漏斗按钮：浮层挡住半张表，用户点旁边的行想关掉它，
+   *  结果点了两次才明白要先点那个小图标。 */
+  onFilterClose?: () => void
   filterOpen?: boolean
   filter?: ReactNode
   /** 各页的提示语不一样，由调用方传入 */
   placeholder?: string
 }) {
   const t = useT()
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!filterOpen || !onFilterClose) return
+    const onDown = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) onFilterClose()
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onFilterClose()
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [filterOpen, onFilterClose])
+
   return (
-    <div className="flex items-center gap-2">
+    <div ref={wrapRef} className="flex items-center gap-2">
       <div className="relative inline-flex items-center w-64">
         <Icon name="i-lucide:search" className="absolute left-3 size-4 text-ink-faint pointer-events-none" />
         <input
@@ -327,6 +389,8 @@ export function SearchBox({
         <div className="relative">
           <button
             type="button"
+            aria-label={t('filter.apply')}
+            title={t('filter.apply')}
             aria-expanded={filterOpen}
             className={`p-1.5 rounded-lg border border-line bg-surface-muted hover:bg-surface-hover text-ink-secondary transition-colors cursor-pointer shadow-2xs ${
               filterOpen ? 'bg-accent-soft border-accent/30 text-accent' : ''

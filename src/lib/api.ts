@@ -3,19 +3,26 @@
 import { API_BASE } from './config'
 import type { TKey } from './i18n'
 import type {
+  Account,
+  AdminAccount,
   ApiKey,
   DataSource,
   GraphLink,
   GraphLinkKind,
   GraphNode,
+  CreatedInvite,
   KnowledgeBase,
+  KnowledgeFile,
   LogDetail,
+  MemberCandidate,
   Memory,
   MemoryGraph,
   Meta,
   ModelRecord,
   ProfileTemplate,
   Project,
+  ProjectInvite,
+  ProjectMember,
   Records,
   RequestLog,
   ToolInfo,
@@ -24,19 +31,26 @@ import type {
 
 /** 页面照旧从 `lib/api` 取这些类型；定义只有 `shared/contract.ts` 一份 */
 export type {
+  Account,
+  AdminAccount,
   ApiKey,
   DataSource,
   GraphLink,
   GraphLinkKind,
   GraphNode,
+  CreatedInvite,
   KnowledgeBase,
+  KnowledgeFile,
   LogDetail,
+  MemberCandidate,
   Memory,
   MemoryGraph,
   Meta,
   ModelRecord,
   ProfileTemplate,
   Project,
+  ProjectInvite,
+  ProjectMember,
   Records,
   RequestLog,
   ToolInfo,
@@ -63,7 +77,7 @@ export class ApiError extends Error {
 }
 
 interface CallOpts {
-  method?: 'GET' | 'POST'
+  method?: 'GET' | 'POST' | 'DELETE'
   body?: unknown
   query?: Record<string, unknown>
 }
@@ -128,19 +142,8 @@ async function call<T>(path: string, opts: CallOpts = {}): Promise<T> {
 
 /* 传输形状在 `shared/contract.ts`，这里只留**页面查询参数**。 */
 
-/** 调用日志的事件类型。列表页筛选下拉是前 10 个；后 4 个只出现在详情页的字段表里 */
-export const EVENT_TYPES = [
-  'addMessage',
-  'searchMemory',
-  'getMemory',
-  'deleteMemory',
-  'addFeedback',
-  'manualAddMemory',
-  'updateMemory',
-  'bindProfileTemplate',
-  'editProfile',
-  'deleteProfile',
-] as const
+/** 调用日志的事件类型。与后端 5 个网关工具一一对应；未知值后端返回 400。 */
+export const EVENT_TYPES = ['addMessage', 'searchMemory', 'getMemory', 'deleteMemory', 'addFeedback'] as const
 
 export interface MemoryListQuery {
   projectId: string
@@ -159,6 +162,8 @@ export interface LogListQuery {
   projectId: string
   pageNum?: number
   pageSize?: number
+  /** all（默认）= 网关调用 + 控制台操作；gateway 只看 5 个记忆工具；console 只看控制台操作 */
+  scope?: 'all' | 'gateway' | 'console'
   subjectId?: string
   subjectType?: string
   eventType?: string
@@ -169,6 +174,54 @@ export interface LogListQuery {
 }
 
 export const api = {
+  auth: {
+    me: () => call<Account>('/api/auth/me', { method: 'GET' }),
+  },
+
+  admin: {
+    accounts: {
+      list: (query = '', page = 1, pageSize = 20) =>
+        call<Records<AdminAccount>>('/admin/accounts', { method: 'GET', query: { query, page, pageSize } }),
+      update: (id: string, body: { display_name?: string; disabled?: boolean; platform_admin?: boolean }) =>
+        call<AdminAccount>(`/admin/accounts/${encodeURIComponent(id)}`, { body }),
+      /** 删除账号：个人项目与成员关系一起删；团队 Key/邀请保留但清空创建者 */
+      remove: (id: string) => call<{ ok: boolean }>(`/admin/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    },
+    members: {
+      list: (tenantId: string) =>
+        call<{ records: ProjectMember[]; total: number }>(`/admin/tenants/${encodeURIComponent(tenantId)}/members`, {
+          method: 'GET',
+        }),
+      set: (tenantId: string, body: { account_id?: string; username?: string; role: string }) =>
+        call<{ account_id: string; tenant_id: string; role: string }>(`/admin/tenants/${encodeURIComponent(tenantId)}/members`, { body }),
+      remove: (tenantId: string, accountId: string) =>
+        call<unknown>(`/admin/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(accountId)}/remove`, {
+          body: {},
+        }),
+      /** 自己退出项目；不需要管理权限，最后一个 owner 会被后端拒绝 */
+      leave: (tenantId: string) => call<{ ok: boolean }>(`/admin/tenants/${encodeURIComponent(tenantId)}/members/leave`, { body: {} }),
+      /** `@` 搜索可加入的人；只有项目 owner 能调 */
+      candidates: (tenantId: string, query: string) =>
+        call<Records<MemberCandidate>>(`/admin/tenants/${encodeURIComponent(tenantId)}/member-candidates`, {
+          method: 'GET',
+          query: { query },
+        }),
+    },
+    invites: {
+      list: (tenantId: string) => call<Records<ProjectInvite>>(`/admin/tenants/${encodeURIComponent(tenantId)}/invites`, { method: 'GET' }),
+      create: (tenantId: string, body: { role: string; expiresIn?: string }) =>
+        call<CreatedInvite>(`/admin/tenants/${encodeURIComponent(tenantId)}/invites`, { body }),
+      revoke: (tenantId: string, inviteId: string) =>
+        call<unknown>(`/admin/tenants/${encodeURIComponent(tenantId)}/invites/${encodeURIComponent(inviteId)}/revoke`, {
+          body: {},
+        }),
+      setRole: (tenantId: string, inviteId: string, role: string) =>
+        call<{ ok: boolean; role: string }>(`/admin/tenants/${encodeURIComponent(tenantId)}/invites/${encodeURIComponent(inviteId)}/role`, {
+          body: { role },
+        }),
+    },
+  },
+
   project: {
     dict: (language: string) => call<Project[]>('/api/dashboard/project/dict', { method: 'GET', query: { language } }),
     list: (pageNum = 1, pageSize = 10) => call<Records<Project>>('/api/dashboard/project/list', { body: { pageNum, pageSize } }),
@@ -176,6 +229,9 @@ export const api = {
     update: (body: Partial<Project> & { id: string }) => call<Project>('/api/dashboard/project/update', { body }),
     /** 切换当前项目就是把它置为 ENABLED */
     revoke: (id: string) => call<unknown>(`/api/dashboard/project/revoke/${encodeURIComponent(id)}`),
+    /** 删除团队项目：归档（软删除），可在项目列表恢复 */
+    remove: (id: string) => call<{ ok: boolean; id: string; archived: boolean }>(`/api/dashboard/project/delete/${encodeURIComponent(id)}`),
+    restore: (id: string) => call<Project>(`/api/dashboard/project/restore/${encodeURIComponent(id)}`),
   },
 
   keys: {
@@ -183,8 +239,8 @@ export const api = {
       call<Records<ApiKey>>('/api/dashboard/keys/list', { body: { projectId, pageNum, pageSize } }),
     create: (projectId: string, keyName: string) => call<ApiKey>('/api/dashboard/keys/create', { body: { projectId, keyName } }),
     revoke: (apiKeyId: string) => call<unknown>(`/api/dashboard/keys/revoke/${encodeURIComponent(apiKeyId)}`),
-    /** 取完整密钥。列表里那份只是展示用 */
-    copy: (apiKeyId: string) => call<string>('/api/dashboard/keys/copy', { body: { apiKeyId } }),
+    rename: (apiKeyId: string, keyName: string) =>
+      call<ApiKey>(`/api/dashboard/keys/rename/${encodeURIComponent(apiKeyId)}`, { body: { keyName } }),
   },
 
   log: {
@@ -204,26 +260,31 @@ export const api = {
       return call<{ memListItemResponseList: Memory[]; total: number; current: number }>('/api/dashboard/project/memory/list', { body })
     },
     detail: (memoryId: string, memType: string) => call<Memory>('/api/dashboard/project/memory/detail', { body: { memoryId, memType } }),
-    remove: (memory_ids: string[], memType: string) =>
-      call<unknown>('/api/dashboard/project/memory/delete', { body: { memory_ids, memType } }),
+    remove: (projectId: string, memory_ids: string[], memType: string) =>
+      call<unknown>('/api/dashboard/project/memory/delete', { body: { projectId, memory_ids, memType } }),
   },
 
   knowledgeBase: {
-    list: (pageNum = 1, pageSize = 10, name = '', projectId = '') =>
-      call<Records<KnowledgeBase>>('/api/dashboard/knowledgebase/list', { body: { pageNum, pageSize, name, projectId } }),
-    create: (body: { knowledgebaseName: string; knowledgebaseDescription: string; projectIds: string[] }) =>
-      call<unknown>('/api/dashboard/knowledgebase/create', { body }),
-    update: (id: string, body: { knowledgebaseName: string; knowledgebaseDescription: string; projectIds: string[] }) =>
-      call<unknown>('/api/dashboard/knowledgebase/update', { body: { id, ...body } }),
-    detail: (knowledgeBaseId: string) => call<KnowledgeBase>('/api/dashboard/knowledgebase/detail', { body: { knowledgeBaseId } }),
-    projectAssociate: (projectId: string, knowledgeBaseIds: string[]) =>
-      call<unknown>('/api/dashboard/knowledgebase/project/associate', { body: { projectId, knowledgeBaseIds } }),
-    projectRemove: (body: { projectId: string; knowledgeBaseId: string; deleteAll?: boolean }) =>
-      call<unknown>('/api/dashboard/knowledgebase/project/remove', { body }),
-    fileList: (knowledgeBaseId: string, pageNum = 1, pageSize = 10) =>
-      call<Records<Record<string, unknown>>>('/api/dashboard/knowledgebase/file/list', { body: { knowledgeBaseId, pageNum, pageSize } }),
-    memoryList: (knowledgeBaseId: string, pageNum = 1, pageSize = 10) =>
-      call<Records<Memory>>('/api/dashboard/knowledgebase/memory/list', { body: { knowledgeBaseId, pageNum, pageSize } }),
+    list: (projectId: string, pageNum = 1, pageSize = 10, name = '') =>
+      call<Records<KnowledgeBase>>('/api/dashboard/knowledgebase/list', { body: { projectId, pageNum, pageSize, name } }),
+    create: (projectId: string, knowledgebaseName: string, knowledgebaseDescription: string) =>
+      call<KnowledgeBase>('/api/dashboard/knowledgebase/create', { body: { projectId, knowledgebaseName, knowledgebaseDescription } }),
+    update: (projectId: string, id: string, body: { knowledgebaseName?: string; knowledgebaseDescription?: string }) =>
+      call<KnowledgeBase>('/api/dashboard/knowledgebase/update', { body: { projectId, id, ...body } }),
+    detail: (projectId: string, knowledgeBaseId: string) =>
+      call<KnowledgeBase>('/api/dashboard/knowledgebase/detail', { body: { projectId, knowledgeBaseId } }),
+    remove: (projectId: string, knowledgeBaseId: string) =>
+      call<{ ok: boolean; id: string }>('/api/dashboard/knowledgebase/delete', { body: { projectId, knowledgeBaseId } }),
+    fileList: (projectId: string, knowledgeBaseId: string, pageNum = 1, pageSize = 10) =>
+      call<Records<KnowledgeFile>>('/api/dashboard/knowledgebase/file/list', { body: { projectId, knowledgeBaseId, pageNum, pageSize } }),
+    fileAdd: (projectId: string, knowledgeBaseId: string, file: { name: string; content: string; type?: string }) =>
+      call<Records<KnowledgeFile>>('/api/dashboard/knowledgebase/file/add', { body: { projectId, knowledgeBaseId, file } }),
+    fileRemove: (projectId: string, fileIds: string[]) =>
+      call<{ ok: boolean; deleted: number }>('/api/dashboard/knowledgebase/file/delete', { body: { projectId, fileIds } }),
+    fileDownloadUrl: (projectId: string, fileId: string) =>
+      `${API_BASE}/api/dashboard/knowledgebase/file/download?projectId=${encodeURIComponent(projectId)}&fileId=${encodeURIComponent(fileId)}`,
+    memoryList: (projectId: string, knowledgeBaseId: string, pageNum = 1, pageSize = 10) =>
+      call<Records<Memory>>('/api/dashboard/knowledgebase/memory/list', { body: { projectId, knowledgeBaseId, pageNum, pageSize } }),
   },
 
   /** 画像模板。注意这个接口的列表键是 list，不是 records */

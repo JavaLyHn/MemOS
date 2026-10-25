@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { AnimatePresence, motion } from 'motion/react'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { makeT, textOf, type Lang, type ParamEntries, type TKey } from './i18n'
-import { api, type Meta, type Project, type ToolInfo } from './api'
+import { api, type Account, type Meta, type Project, type ToolInfo } from './api'
+import { DUR, EASE_IN_FAST, EASE_OUT_EXPO } from './motion'
 import { Icon } from '../components/Icon'
 
 const LANG_KEY = 'console.lang'
@@ -65,14 +66,27 @@ interface Toast {
 
 const ToastContext = createContext<{ push: (text: string, kind?: 'ok' | 'err') => void } | null>(null)
 
+/** 提示条停留时长。
+ *
+ *  错误要留得久一些：上游 500 的原文往往两行都放不下，2.8 秒读到一半就没了，
+ *  用户还得再触发一次同样的失败才看得到。成功提示看一眼就够，不必占着视线。 */
+const TOAST_MS = { ok: 2600, err: 6000 } as const
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [list, setList] = useState<Toast[]>([])
+  const reduce = useReducedMotion()
+  const tr = useT()
 
-  const push = useCallback((text: string, kind: 'ok' | 'err' = 'ok') => {
-    const id = Date.now() + Math.random()
-    setList((l) => [...l, { id, text, kind }])
-    setTimeout(() => setList((l) => l.filter((t) => t.id !== id)), 2800)
-  }, [])
+  const dismiss = useCallback((id: number) => setList((l) => l.filter((x) => x.id !== id)), [])
+
+  const push = useCallback(
+    (text: string, kind: 'ok' | 'err' = 'ok') => {
+      const id = Date.now() + Math.random()
+      setList((l) => [...l, { id, text, kind }])
+      setTimeout(() => dismiss(id), TOAST_MS[kind])
+    },
+    [dismiss],
+  )
 
   return (
     <ToastContext.Provider value={{ push }}>
@@ -82,13 +96,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           {list.map((t) => (
             <motion.div
               key={t.id}
-              initial={{ opacity: 0, y: -16, scale: 0.94 }}
+              initial={reduce ? { opacity: 0 } : { opacity: 0, y: -12, scale: 0.96 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -10, scale: 0.96 }}
-              transition={{ type: 'spring', stiffness: 450, damping: 30 }}
-              className={`toast toast--${t.kind}`}
-              role="status"
-              aria-live="polite"
+              exit={
+                reduce
+                  ? { opacity: 0, transition: { duration: 0 } }
+                  : { opacity: 0, y: -8, scale: 0.98, transition: { duration: DUR.fast, ease: EASE_IN_FAST } }
+              }
+              transition={reduce ? { duration: 0 } : { duration: DUR.base, ease: EASE_OUT_EXPO }}
+              className={`toast toast--${t.kind} toast--dismissable`}
+              role={t.kind === 'err' ? 'alert' : 'status'}
+              aria-live={t.kind === 'err' ? 'assertive' : 'polite'}
+              title={tr('common.close')}
+              onClick={() => dismiss(t.id)}
             >
               <Icon name={t.kind === 'ok' ? 'i-lucide:check-circle-2' : 'i-lucide:alert-circle'} className="toast__icon" />
               <span className="toast__text">{t.text}</span>
@@ -130,6 +150,7 @@ const ProjectContext = createContext<ProjectCtx | null>(null)
 /** 当前项目：dict 里 status === "ENABLED" 的那条，选择结果本地记住 */
 export function ProjectProvider({ children }: { children: ReactNode }) {
   const { lang } = useLang()
+  const { reloadAccount } = useMeta()
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [tick, setTick] = useState(0)
@@ -174,9 +195,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         setPicked(id)
         await api.project.update({ id, status: 'ENABLED' })
         setTick((t) => t + 1)
+        // 业务页和「当前项目」徽标都以 /api/auth/me 为准：不刷新的话切换只更新了
+        // 侧边栏的勾选，页面内容仍按旧项目渲染。
+        await reloadAccount()
       },
     }),
-    [currentProjectId, projects, loading],
+    [currentProjectId, projects, loading, reloadAccount],
   )
 
   return <ProjectContext.Provider value={value}>{children}</ProjectContext.Provider>
@@ -189,11 +213,18 @@ export function useProject() {
 }
 
 interface MetaCtx {
-  /** 服务端是否开着鉴权（`/api/meta` 的 `authEnabled`）。没拿到 meta 时按「没开」处理 */
   authEnabled: boolean
-  /** 只有 `page` 形态能从前端登出：basic 形态下凭据由浏览器缓存，登不掉 */
   canLogout: boolean
   meta: Meta | null
+  account: Account | null
+  /** 重取 `/api/auth/me`。切换当前项目后必须调：`currentProjectId` 只在登录时取一次，
+   *  不刷新的话页面上的「当前项目」标记会停在切换前那一条。 */
+  reloadAccount: () => Promise<void>
+  /** 真实身份是否是平台管理员（预览模式不影响它，供菜单显示开关）。 */
+  realAdmin: boolean
+  /** 预览普通用户视角：只把 `platformAdmin` 从 UI 上隐藏，不改任何权限。 */
+  previewUser: boolean
+  setPreviewUser: (v: boolean) => void
   keyPrefix: string
   tools: ToolInfo[]
 }
@@ -203,35 +234,67 @@ const FALLBACK_KEY_PREFIX = 'sk-'
 const MetaContext = createContext<MetaCtx | null>(null)
 
 /** 运行信息全局取一次，前端不写死 */
+const PREVIEW_KEY = 'console.previewUser'
+
 export function MetaProvider({ children }: { children: ReactNode }) {
   const [meta, setMeta] = useState<Meta | null>(null)
+  const [account, setAccount] = useState<Account | null>(null)
+  const [previewUser, setPreviewUserState] = useState(() => localStorage.getItem(PREVIEW_KEY) === '1')
+  const setPreviewUser = useCallback((v: boolean) => {
+    localStorage.setItem(PREVIEW_KEY, v ? '1' : '0')
+    setPreviewUserState(v)
+  }, [])
+
+  const reloadAccount = useCallback(async () => {
+    try {
+      setAccount(await api.auth.me())
+    } catch {
+      setAccount(null)
+    }
+  }, [])
 
   useEffect(() => {
     let alive = true
     api
       .meta()
       .then((m) => {
-        if (alive) setMeta(m)
+        if (!alive) return
+        setMeta(m)
+        if (m.authEnabled) void reloadAccount()
       })
       .catch(() => {
-        if (alive) setMeta(null)
+        if (alive) {
+          setMeta(null)
+          setAccount(null)
+        }
       })
     return () => {
       alive = false
     }
-  }, [])
+  }, [reloadAccount])
+
+  const realAdmin = account?.platformAdmin === true
+  // 预览模式把 platformAdmin 从界面上拿掉，页面里的管理员入口（用户页签、指派项目、
+  // 管理员徽标）会按普通用户渲染；后端权限完全不受影响，这是给自己看视角用的。
+  const visibleAccount = useMemo(
+    () => (previewUser && realAdmin && account ? { ...account, platformAdmin: false } : account),
+    [previewUser, realAdmin, account],
+  )
 
   const value = useMemo<MetaCtx>(
     () => ({
       meta,
+      account: visibleAccount,
+      reloadAccount,
+      realAdmin,
+      previewUser,
+      setPreviewUser,
       keyPrefix: meta?.keyPrefix || FALLBACK_KEY_PREFIX,
       tools: meta?.tools ?? [],
-      // ⚠️ meta 没回来（或取失败）时一律当成「没开鉴权」：这时候显示「退出登录」
-      //    可能是个死按钮，而不显示最多是少一个入口——宁可少给，不要给一个点了没反应的。
       authEnabled: Boolean(meta?.authEnabled),
-      canLogout: Boolean(meta?.authEnabled) && meta?.authMode === 'page',
+      canLogout: Boolean(meta?.authEnabled) && meta?.authMode !== 'basic',
     }),
-    [meta],
+    [meta, visibleAccount, realAdmin, previewUser, setPreviewUser, reloadAccount],
   )
 
   return <MetaContext.Provider value={value}>{children}</MetaContext.Provider>

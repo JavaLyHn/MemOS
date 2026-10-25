@@ -26,6 +26,7 @@ import type { GraphNode, MemoryGraph } from '../../shared/contract'
 import { buildLayout, hexToRgba, LINK_COLORS, typeColor, type Layout } from '../lib/constellation'
 import { useT } from '../lib/store'
 import { useTheme } from '../lib/theme'
+import { prefersReducedMotion, usePrefersReducedMotion } from '../lib/usePrefersReducedMotion'
 import { Icon } from './Icon'
 import { drawMinimap, drawScene, hitTest, MINIMAP, palette, projectNodes, type Camera, type Frame } from './constellation/draw'
 
@@ -38,6 +39,37 @@ export interface ConstellationProps {
 
 const fmtTime = (iso: string) => (iso ? iso.slice(0, 19).replace('T', ' ') : '-')
 
+const MOTION_KEY = 'graph.motion'
+const HIDDEN_TYPES_KEY = 'graph.hiddenTypes'
+
+/** 读 localStorage 失败（隐私模式/配额）时退化为默认值，不能因此白屏。 */
+function readStored(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeStored(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    /* 存不下就算了，本次会话仍然有效 */
+  }
+}
+
+function readHiddenTypes(): Set<string> {
+  const raw = readStored(HIDDEN_TYPES_KEY)
+  if (!raw) return new Set()
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
 export function Constellation({ graph, onSelect, selectedId }: ConstellationProps) {
   const t = useT()
   const { resolved: theme } = useTheme()
@@ -47,11 +79,20 @@ export function Constellation({ graph, onSelect, selectedId }: ConstellationProp
   const animRef = useRef(0)
   const clockRef = useRef({ seconds: 0, lastMs: 0 })
 
-  const [hidden, setHidden] = useState<Set<string>>(new Set())
-  const [motion, setMotion] = useState(true)
+  const [hidden, setHidden] = useState<Set<string>>(readHiddenTypes)
+  /* 初始动效：用户手动选过就沿用；没选过则尊重系统 prefers-reduced-motion，
+     避免一进来就开始漂移/呼吸。 */
+  const [motion, setMotion] = useState(() => {
+    const saved = readStored(MOTION_KEY)
+    if (saved === 'on') return true
+    if (saved === 'off') return false
+    return !prefersReducedMotion()
+  })
   const [full, setFull] = useState(false)
   const [hover, setHover] = useState<{ id: string; x: number; y: number } | null>(null)
-  const motionRef = useRef(true)
+  const motionRef = useRef(motion)
+  const manualMotionRef = useRef(readStored(MOTION_KEY) !== null)
+  const prefersReduced = usePrefersReducedMotion()
 
   /** 过滤掉被关掉的类型。连线不用跟着过滤——buildLayout 会丢掉端点不存在的边。 */
   const layout = useMemo<Layout>(() => {
@@ -125,7 +166,10 @@ export function Constellation({ graph, onSelect, selectedId }: ConstellationProp
 
     const now = performance.now()
     const clock = clockRef.current
-    if (motionRef.current && clock.lastMs > 0) clock.seconds += (now - clock.lastMs) / 1000
+    // 标签页在后台时 rAF 会暂停；恢复后第一帧的 delta 可能是几分钟，
+    // 直接累加会让星云瞬移。超过 500ms 的间隔视为“暂停后的恢复”，不推进时钟。
+    const gap = clock.lastMs > 0 ? now - clock.lastMs : 0
+    if (motionRef.current && gap > 0 && gap < 500) clock.seconds += gap / 1000
     clock.lastMs = now
     const time = clock.seconds
 
@@ -164,6 +208,20 @@ export function Constellation({ graph, onSelect, selectedId }: ConstellationProp
   useEffect(() => {
     animateRef.current = animate
   }, [animate])
+
+  /* 系统偏好在运行中变化：只有用户没手动选过时才跟随。 */
+  useEffect(() => {
+    if (!manualMotionRef.current) setMotion(!prefersReduced)
+  }, [prefersReduced])
+
+  useEffect(() => {
+    motionRef.current = motion
+  }, [motion])
+
+  /* 图例过滤是用户的工作状态，刷新/切页后不该重置。 */
+  useEffect(() => {
+    writeStored(HIDDEN_TYPES_KEY, JSON.stringify([...hidden]))
+  }, [hidden])
 
   /* -------------------------------------------------------------- 尺寸 */
 
@@ -335,11 +393,12 @@ export function Constellation({ graph, onSelect, selectedId }: ConstellationProp
   }
 
   const toggleMotion = () => {
-    setMotion((prev) => {
-      const next = !prev
-      motionRef.current = next
-      return next
-    })
+    manualMotionRef.current = true
+    const next = !motionRef.current
+    motionRef.current = next
+    setMotion(next)
+    /* 只有用户手动切换才写入偏好；系统偏好触发的初始值不落盘。 */
+    writeStored(MOTION_KEY, next ? 'on' : 'off')
   }
 
   /** 工具栏的放大 / 缩小。锚点是画布中心（滚轮那套才以光标为锚点）。 */

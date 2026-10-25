@@ -428,7 +428,7 @@
   box-shadow:
     0 6px 20px rgba(15, 23, 42, 0.1),
     0 1px 3px rgba(15, 23, 42, 0.06);
-  animation: toast-in 0.16s ease-out;
+  animation: toast-in var(--dur-base) var(--ease-emphasized);
 }
 .toast--err {
   color: #b91c1c;
@@ -448,6 +448,12 @@
 .toast__text {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+/* 提示条可以点掉。容器是 `pointer-events-none`（别挡住底下的页面），
+   所以这里要单独把事件收回来。 */
+.toast--dismissable {
+  pointer-events: auto;
+  cursor: pointer;
 }
 @keyframes toast-in {
   from {
@@ -520,6 +526,139 @@
   }
 }
 
+/* 筛选浮层：贴着触发按钮往下「放下」。缩放幅度比弹窗更小，动作大了会显得要跳走。
+   写在这里而不是 tsx 的任意值类——预编译产物里没有的 `animate-[…]` 不会生效。 */
+.popover-panel {
+  animation: popover-in var(--dur-fast) var(--ease-emphasized);
+  transform-origin: top right;
+}
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .popover-panel {
+    animation-duration: 0.01ms;
+  }
+}
+
+/* 详情弹窗的骨架区。高度贴着真实内容给，数据到达时弹窗不会先小后大地跳一下——
+   弹窗尺寸突变会被看成「关掉一个又开了一个」。 */
+.detail-skeleton {
+  min-height: 200px;
+}
+
+/* 按钮内的转圈。`border-current` / `border-t-transparent` / `size-3.5` 都不在
+   预编译产物里（AGENTS 第 5 条），所以写在这里而不是当工具类用。 */
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 9999px;
+  animation: spin 0.7s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn-spinner {
+    animation-duration: 1.6s;
+  }
+}
+
+/* 图谱画布取数时的骨架：几颗呼吸的星点 + 中间转圈。
+   纯文字加载态在一块大画布上显得像「坏了」，星点至少让人知道图正在成形。 */
+.graph-skeleton {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--app-surface);
+}
+.graph-skeleton__dot {
+  position: absolute;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--app-accent) 30%, transparent);
+  animation: graph-skel 1.6s var(--ease-soft) infinite;
+}
+.graph-skeleton__label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--app-ink-muted);
+}
+@keyframes graph-skel {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.18);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-skeleton__dot {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+/* 图谱画布取数时的转圈。和上面那组星点配合：星点说明「图正在成形」，
+   转圈 + 文字说明「还在等」。只有文字时，一整块大画布看着像坏了。 */
+.graph-spinner {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border: 2px solid color-mix(in oklab, var(--app-accent) 25%, transparent);
+  border-top-color: var(--app-accent);
+  border-radius: 9999px;
+  animation: spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-spinner {
+    animation-duration: 1.8s;
+  }
+}
+
+/* 复制按钮：常显但压低对比度，悬停/复制成功时变实。
+   预编译产物里的 `.base-copyable-wrapper` 是 `opacity:0`（悬停才出现），
+   代码块里唯一的操作被藏起来，第一次用的人根本不知道那里有东西。 */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--app-ink-muted);
+  cursor: pointer;
+  opacity: 0.7;
+  transition:
+    opacity var(--dur-fast) var(--ease-exit),
+    color var(--dur-fast) var(--ease-exit),
+    background-color var(--dur-fast) var(--ease-exit);
+}
+.copy-btn:hover,
+.copy-btn:focus-visible {
+  opacity: 1;
+  color: var(--app-ink-secondary);
+  background-color: var(--app-surface-hover);
+}
+.copy-btn:active {
+  opacity: 1;
+}
+
 /* ------------------------------------------------------------ 补齐缺失的图标
  *
  * 图标是 CSS mask，类名不存在就等于**什么都不渲染**——不是显示成小方块，
@@ -537,7 +676,14 @@
 .i-lucide\:monitor,
 .i-lucide\:trash-2,
 .i-lucide\:eye,
-.i-lucide\:more-horizontal {
+.i-lucide\:more-horizontal,
+.i-lucide\:user-plus,
+.i-lucide\:users,
+.i-lucide\:shield,
+.i-lucide\:shield-off,
+.i-lucide\:ban,
+.i-lucide\:pencil,
+.i-lucide\:folder-plus {
   display: inline-block;
   width: 1em;
   height: 1em;
@@ -581,6 +727,27 @@
 }
 .i-lucide\:more-horizontal {
   --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cg fill='black'%3E%3Ccircle cx='12' cy='12' r='1.6'/%3E%3Ccircle cx='19' cy='12' r='1.6'/%3E%3Ccircle cx='5' cy='12' r='1.6'/%3E%3C/g%3E%3C/svg%3E");
+}
+.i-lucide\:user-plus {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E<path d='M2 21a8 8 0 0 1 13.292-6'/><circle cx='10' cy='8' r='5'/><path d='M19 16v6M22 19h-6'/>%3C/g%3E%3C/svg%3E");
+}
+.i-lucide\:users {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E<path d='M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2'/><circle cx='9' cy='7' r='4'/><path d='M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75'/>%3C/g%3E%3C/svg%3E");
+}
+.i-lucide\:shield {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E<path d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/>%3C/g%3E%3C/svg%3E");
+}
+.i-lucide\:shield-off {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E<path d='m2 2 20 20'/><path d='M5 5v8c0 5 3.5 7.5 7.66 8.95a1 1 0 0 0 .67-.01c1.55-.58 2.92-1.31 4.05-2.27'/><path d='M19.6 14.6c.26-1.04.4-2.2.4-3.6V6a1 1 0 0 0-1-1c-2 0-4.5-1.2-6.24-2.72a1.17 1.17 0 0 0-1.52 0C10.43 3.52 9.08 4.55 8 5.2'/>%3C/g%3E%3C/svg%3E");
+}
+.i-lucide\:ban {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E<circle cx='12' cy='12' r='10'/><path d='m4.9 4.9 14.2 14.2'/>%3C/g%3E%3C/svg%3E");
+}
+.i-lucide\:pencil {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E<path d='M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z'/><path d='m15 5 4 4'/>%3C/g%3E%3C/svg%3E");
+}
+.i-lucide\:folder-plus {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E<path d='M12 10v6M9 13h6'/><path d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z'/>%3C/g%3E%3C/svg%3E");
 }
 
 /* ---------------------------------------------------------------- 弹窗动画
@@ -648,6 +815,13 @@
 }
 .dark .text-third-gray {
   color: var(--app-ink-faint);
+}
+
+/* 暗色下的滚动条。浏览器默认画的是浅灰白轨道，落在深色面板上就像一道白杠
+   （2026-10-24 在记忆列表右侧实测到）。`scrollbar-color` 可继承，写在根上即可；
+   不要用 `::-webkit-scrollbar` 那套——它会连宽度一起接管，和系统「自动隐藏」冲突。 */
+.dark {
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
 /* 表格行进入。分页、切页签时让内容「落下来」而不是硬切；

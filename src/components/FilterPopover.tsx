@@ -20,7 +20,7 @@ export function FilterPopover({
   const t = useT()
   if (!open) return null
   return (
-    <div className="absolute top-full right-0 mt-2 w-[380px] bg-surface rounded-xl shadow-xl border border-line p-4.5 z-50 animate-[scale-in_150ms_ease-out]">
+    <div className="absolute top-full right-0 mt-2 w-[380px] bg-surface rounded-xl shadow-xl border border-line p-4.5 z-50 popover-panel">
       {children}
       <div className="flex items-center justify-between pt-3 border-t border-line">
         <button

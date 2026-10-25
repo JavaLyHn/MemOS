@@ -2,13 +2,13 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Icon } from '../components/Icon'
 import { AccessMethodHint } from '../components/AccessMethodHint'
+import { CopyButton } from '../components/ui/copy-button'
 import { useLang, useT, useToast, useMeta } from '../lib/store'
 import { copyText } from '../lib/clipboard'
 import { HINT_COPY, buildTabs, tabLabel, type Step } from '../lib/quickstart-data'
 
 const Q = { 'data-v-de9e37d2': '' } as const
 const S = { 'data-v-82f9e747': '' } as const
-const C = { 'data-v-ce54f47b': '' } as const
 const N = { 'data-v-36c1fd29': '' } as const
 const B = { 'data-v-e281b1a5': '' } as const
 
@@ -21,13 +21,9 @@ const SUBTAB_ACTIVE =
 const PILL_OUTLINE =
   'rounded-md font-medium inline-flex items-center disabled:cursor-not-allowed aria-disabled:cursor-not-allowed disabled:opacity-75 aria-disabled:opacity-75 transition-colors px-2.5 py-1.5 text-xs gap-1.5 ring ring-inset ring-primary/50 text-primary hover:bg-primary/10 active:bg-primary/10 disabled:bg-transparent aria-disabled:bg-transparent'
 
-const COPY_BTN =
-  'rounded-md font-medium inline-flex items-center disabled:cursor-not-allowed aria-disabled:cursor-not-allowed disabled:opacity-75 aria-disabled:opacity-75 transition-colors text-xs gap-1 text-default hover:bg-elevated active:bg-elevated focus:outline-none focus-visible:bg-elevated hover:disabled:bg-transparent dark:hover:disabled:bg-transparent hover:aria-disabled:bg-transparent dark:aria-disabled:bg-transparent p-1'
-
 function CodeBlock({ step }: { step: Step }) {
   const t = useT()
   const { lang } = useLang()
-  const toast = useToast()
   // 「获取 API Key」这类步骤在控制台里有对应页面，渲染成一个跳转按钮：
   // 放一段代码（哪怕是占位符）也帮不上忙，人需要的是那把钥匙本身。
   if (step.link) {
@@ -57,23 +53,7 @@ function CodeBlock({ step }: { step: Step }) {
             </code>
           )}
         </div>
-        <span {...C} {...S} className="base-copyable-wrapper shrink-0">
-          <button
-            type="button"
-            aria-label={t('quickstart.copyStep')}
-            className={COPY_BTN}
-            onClick={async () => {
-              try {
-                await copyText(step.code)
-                toast(t('common.copied'))
-              } catch {
-                toast(t('common.copyFailed'), 'err')
-              }
-            }}
-          >
-            <Icon name="i-lucide:copy" className="shrink-0 size-4" />
-          </button>
-        </span>
+        <CopyButton text={step.code} label={t('quickstart.copyStep')} className="absolute right-2 top-2" />
       </div>
     </div>
   )
