@@ -3,7 +3,7 @@
   "info": {
     "title": "MemOS Dashboard API",
     "version": "0.1.0",
-    "description": "控制台前端依赖的后端接口定义。\n\n## 通用约定\n\n**统一返回格式。** 所有接口返回 `{ code, data, message }`。`code === 0` 表示成功，前端解包后只拿 `data`；非 0 时前端按错误处理，把 `message` 弹成提示。HTTP 状态码不参与判断，200 + 非 0 code 也算失败。\n\n**请求体。** 除少数 GET 外，参数一律放 body，不放 query。字段值为空串或 null 时前端会**删掉该字段**再发出去，后端要按「字段不存在」处理，不要依赖空串。\n\n**分页。** 参数名固定 `pageNum` / `pageSize`，从 1 开始。\n\n**列表响应的键不统一。** 同一个前端里四种写法并存，这是最容易被忽略的地方：\n\n| 接口 | 列表键 | 分页字段 |\n|---|---|---|\n| `project/list`、`keys/list`、`knowledgebase/list`、`knowledgebase/memory/list` | `records` | `total` |\n| `log/list` | `logs` | `total` |\n| `project/memory/list` | `memListItemResponseList` | `total`、`current` |\n| `profileTemplate/list` | `list` | `total`、`current`、`size`、`pages` |\n\n**时间字段。** 一律叫 `createTime`（不是 `createdAt`），值是可被 `dayjs` 直接解析的字符串。\n\n## 错误码\n\n| code | 含义 |\n|---|---|\n| 0 | 成功 |\n| 40000 | 参数错误 |\n| 40001 | 资源不存在 |\n| 40002 | 请求过于频繁 |\n| 40003 | 无权限 |\n| 40100 | 未登录 |\n| 40104 | 未授权 |\n| 50106 | 知识库数量超限 |\n| 50107 | 文档删除中 |\n| 60004 | 容量超限 |\n\n## 模型列表不走接口\n\n「模型列表」页的数据来自静态 JSON（形状 `{ records: [...] }`），由前端从配置目录取，后端不需要实现。\n\n## 鉴权\n\n**控制台目前不发任何鉴权头**，请求里只有 `Content-Type`。所以本接口定义按「无鉴权」描述（根级 `security: []`）。\n\n真实后端要不要加鉴权、加在哪一层需要单独决定：控制台没有登录页，后端若要求 token，前端也要相应改动。"
+    "description": "控制台前端依赖的后端接口定义。\n\n## 通用约定\n\n**统一返回格式。** 所有接口返回 `{ code, data, message }`。`code === 0` 表示成功，前端解包后只拿 `data`；非 0 时前端按错误处理，把 `message` 弹成提示。HTTP 状态码不参与判断，200 + 非 0 code 也算失败。\n\n**请求体。** 除少数 GET 外，参数一律放 body，不放 query。字段值为空串或 null 时前端会**删掉该字段**再发出去，后端要按「字段不存在」处理，不要依赖空串。\n\n**分页。** 参数名固定 `pageNum` / `pageSize`，从 1 开始。\n\n**列表响应的键不统一。** 同一个前端里四种写法并存，这是最容易被忽略的地方：\n\n| 接口 | 列表键 | 分页字段 |\n|---|---|---|\n| `project/list`、`keys/list`、`knowledgebase/list`、`knowledgebase/memory/list` | `records` | `total` |\n| `log/list` | `logs` | `total` |\n| `project/memory/list` | `memListItemResponseList` | `total`、`current` |\n| `profileTemplate/list` | `list` | `total`、`current`、`size`、`pages` |\n\n**时间字段。** 一律叫 `createTime`（不是 `createdAt`），值是可被 `dayjs` 直接解析的字符串。\n\n## 错误码\n\n| code | 含义 |\n|---|---|\n| 0 | 成功 |\n| 40000 | 参数错误 |\n| 40001 | 资源不存在 |\n| 40002 | 请求过于频繁 |\n| 40003 | 无权限 |\n| 40100 | 未登录 |\n| 40104 | 未授权 |\n| 50106 | 知识库数量超限 |\n| 50107 | 文档删除中 |\n| 60004 | 容量超限 |\n\n## 模型列表\n\n「模型列表」页的数据来自 `GET /api/dashboard/models`，返回上游实际生效的模型配置（形状 `{ records: [...] }`）。\n\n## 鉴权\n\n**控制台不发任何鉴权头**，请求里只有 `Content-Type`；但同源请求会自动带 Cookie。根级 `security: []` 表示不要求在请求头里放 token。\n\nv2 新增了 `/api/auth/me` 与 `/admin/*`：前者返回当前登录主体，后者需要管理员身份。会话方式（Cookie / 反向代理注入 / 其他）由后端决定；若改成要求 token，前端也要相应改动。\n\n**字段命名。** `/api/*` 用 camelCase；`/admin/*` 沿用 snake_case（`display_name`、`platform_admin`、`created_at`），不要统一改成 camelCase。"
   },
   "security": [],
   "servers": [
@@ -13,22 +13,65 @@
     }
   ],
   "tags": [
-    { "name": "项目", "description": "工作区。几乎所有业务接口都要它的 id。" },
-    { "name": "接口密钥", "description": "密钥的增删查与复制。" },
-    { "name": "调用日志", "description": "调用流水与单条详情。" },
-    { "name": "记忆", "description": "记忆的列表、详情与删除。" },
-    { "name": "知识库", "description": "知识库及其文档、记忆。" },
-    { "name": "属性树模板", "description": "属性树模板的增删改查。" },
-    { "name": "自定义抽取", "description": "抽取 Prompt 的读写与调试。" },
-    { "name": "用量", "description": "按天聚合的调用用量。" },
-    { "name": "技能", "description": "技能包 Markdown。" },
-    { "name": "账号", "description": "额度与订阅。" },
-    { "name": "运行信息", "description": "控制台自身的运行状态。" }
+    {
+      "name": "项目",
+      "description": "工作区。几乎所有业务接口都要它的 id。"
+    },
+    {
+      "name": "接口密钥",
+      "description": "密钥的增删查与复制。"
+    },
+    {
+      "name": "调用日志",
+      "description": "调用流水与单条详情。"
+    },
+    {
+      "name": "记忆",
+      "description": "记忆的列表、详情与删除。"
+    },
+    {
+      "name": "知识库",
+      "description": "知识库及其文档、记忆。"
+    },
+    {
+      "name": "属性树模板",
+      "description": "属性树模板的增删改查。"
+    },
+    {
+      "name": "自定义抽取",
+      "description": "抽取 Prompt 的读写与调试。"
+    },
+    {
+      "name": "用量",
+      "description": "按天聚合的调用用量。"
+    },
+    {
+      "name": "技能",
+      "description": "技能包 Markdown。"
+    },
+    {
+      "name": "账号",
+      "description": "额度与订阅。"
+    },
+    {
+      "name": "运行信息",
+      "description": "控制台自身的运行状态。"
+    },
+    {
+      "name": "图谱",
+      "description": "记忆图谱的只读视图"
+    },
+    {
+      "name": "模型",
+      "description": "上游实际生效的模型清单"
+    }
   ],
   "paths": {
     "/api/dashboard/project/dict": {
       "get": {
-        "tags": ["项目"],
+        "tags": [
+          "项目"
+        ],
         "summary": "项目下拉字典",
         "description": "返回**数组**，不是分页对象。`status === \"ENABLED\"` 的那条是当前项目。",
         "parameters": [
@@ -36,17 +79,27 @@
             "name": "language",
             "in": "query",
             "required": false,
-            "schema": { "type": "string", "examples": ["zh-CN", "en-US"] }
+            "schema": {
+              "type": "string",
+              "examples": [
+                "zh-CN",
+                "en-US"
+              ]
+            }
           }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/ProjectDict" }
+          "200": {
+            "$ref": "#/components/responses/ProjectDict"
+          }
         }
       }
     },
     "/api/dashboard/project/list": {
       "post": {
-        "tags": ["项目"],
+        "tags": [
+          "项目"
+        ],
         "summary": "项目分页列表",
         "requestBody": {
           "required": true,
@@ -55,21 +108,31 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "pageNum": { "type": "integer", "default": 1 },
-                  "pageSize": { "type": "integer", "default": 10 }
+                  "pageNum": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "pageSize": {
+                    "type": "integer",
+                    "default": 10
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/ProjectRecords" }
+          "200": {
+            "$ref": "#/components/responses/ProjectRecords"
+          }
         }
       }
     },
     "/api/dashboard/project/create": {
       "post": {
-        "tags": ["项目"],
+        "tags": [
+          "项目"
+        ],
         "summary": "新建项目",
         "description": "返回新建的项目对象，前端拿它的 `id` 立刻切过去。",
         "requestBody": {
@@ -78,24 +141,41 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["name", "description"],
+                "required": [
+                  "name",
+                  "description"
+                ],
                 "properties": {
-                  "name": { "type": "string" },
-                  "description": { "type": "string" },
-                  "isMultiView": { "type": "integer", "enum": [0, 1] }
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "isMultiView": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/Project" }
+          "200": {
+            "$ref": "#/components/responses/Project"
+          }
         }
       }
     },
     "/api/dashboard/project/update": {
       "post": {
-        "tags": ["项目"],
+        "tags": [
+          "项目"
+        ],
         "summary": "更新项目 / 切换当前项目",
         "description": "切换当前项目就是传 `{ id, status: \"ENABLED\" }`，后端要把其它项目置回 `DISABLED`。",
         "requestBody": {
@@ -104,14 +184,26 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  { "$ref": "#/components/schemas/Project" },
+                  {
+                    "$ref": "#/components/schemas/Project"
+                  },
                   {
                     "type": "object",
                     "properties": {
-                      "id": { "type": "string" },
-                      "status": { "type": "string", "enum": ["ENABLED", "DISABLED"] }
+                      "id": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "ENABLED",
+                          "DISABLED"
+                        ]
+                      }
                     },
-                    "required": ["id"]
+                    "required": [
+                      "id"
+                    ]
                   }
                 ]
               }
@@ -119,23 +211,40 @@
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/Project" }
+          "200": {
+            "$ref": "#/components/responses/Project"
+          }
         }
       }
     },
     "/api/dashboard/project/revoke/{id}": {
       "post": {
-        "tags": ["项目"],
+        "tags": [
+          "项目"
+        ],
         "summary": "删除项目",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
         }
       }
     },
     "/api/dashboard/keys/list": {
       "post": {
-        "tags": ["接口密钥"],
+        "tags": [
+          "接口密钥"
+        ],
         "summary": "密钥分页列表",
         "description": "列表里下发的 `apiKey` 就是**完整密钥**，没有掩码字段，前端自己截断成 `${key.slice(0,7)}*******${key.slice(-8)}` 展示。",
         "requestBody": {
@@ -144,24 +253,38 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["projectId"],
+                "required": [
+                  "projectId"
+                ],
                 "properties": {
-                  "projectId": { "type": "string" },
-                  "pageNum": { "type": "integer", "default": 1 },
-                  "pageSize": { "type": "integer", "default": 10 }
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "pageNum": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "pageSize": {
+                    "type": "integer",
+                    "default": 10
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/ApiKeyRecords" }
+          "200": {
+            "$ref": "#/components/responses/ApiKeyRecords"
+          }
         }
       }
     },
     "/api/dashboard/keys/create": {
       "post": {
-        "tags": ["接口密钥"],
+        "tags": [
+          "接口密钥"
+        ],
         "summary": "新建密钥",
         "requestBody": {
           "required": true,
@@ -169,33 +292,57 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["projectId", "keyName"],
+                "required": [
+                  "projectId",
+                  "keyName"
+                ],
                 "properties": {
-                  "projectId": { "type": "string" },
-                  "keyName": { "type": "string" }
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "keyName": {
+                    "type": "string"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/ApiKey" }
+          "200": {
+            "$ref": "#/components/responses/ApiKey"
+          }
         }
       }
     },
-    "/api/dashboard/keys/revoke/{apiKeyId}": {
+    "/api/dashboard/keys/revoke/{id}": {
       "post": {
-        "tags": ["接口密钥"],
+        "tags": [
+          "接口密钥"
+        ],
         "summary": "吊销密钥",
-        "parameters": [{ "name": "apiKeyId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
         }
       }
     },
     "/api/dashboard/keys/copy": {
       "post": {
-        "tags": ["接口密钥"],
+        "tags": [
+          "接口密钥"
+        ],
         "summary": "取完整密钥",
         "description": "`data` 是密钥字符串本身，不是对象。",
         "requestBody": {
@@ -204,20 +351,30 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["apiKeyId"],
-                "properties": { "apiKeyId": { "type": "string" } }
+                "required": [
+                  "apiKeyId"
+                ],
+                "properties": {
+                  "apiKeyId": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/StringData" }
+          "200": {
+            "$ref": "#/components/responses/StringData"
+          }
         }
       }
     },
     "/api/dashboard/log/list": {
       "post": {
-        "tags": ["调用日志"],
+        "tags": [
+          "调用日志"
+        ],
         "summary": "调用日志分页列表",
         "description": "`pageSize` 默认 50，前端只渲染返回结果的前 100 条。\n\n`subjectType` 取 `all` / `user` / `agent`；`subjectId` 为空时 `subjectType` 会被强制清空。",
         "requestBody": {
@@ -226,31 +383,64 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["projectId"],
+                "required": [
+                  "projectId"
+                ],
                 "properties": {
-                  "projectId": { "type": "string" },
-                  "pageNum": { "type": "integer", "default": 1 },
-                  "pageSize": { "type": "integer", "default": 50 },
-                  "subjectId": { "type": "string" },
-                  "subjectType": { "type": "string", "enum": ["all", "user", "agent"] },
-                  "eventType": { "$ref": "#/components/schemas/EventType" },
-                  "query": { "type": "string" },
-                  "status": { "type": "string" },
-                  "startTime": { "type": "string" },
-                  "endTime": { "type": "string" }
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "pageNum": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "pageSize": {
+                    "type": "integer",
+                    "default": 50
+                  },
+                  "subjectId": {
+                    "type": "string"
+                  },
+                  "subjectType": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "user",
+                      "agent"
+                    ]
+                  },
+                  "eventType": {
+                    "$ref": "#/components/schemas/EventType"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "startTime": {
+                    "type": "string"
+                  },
+                  "endTime": {
+                    "type": "string"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/LogList" }
+          "200": {
+            "$ref": "#/components/responses/LogList"
+          }
         }
       }
     },
     "/api/dashboard/log/detail": {
       "post": {
-        "tags": ["调用日志"],
+        "tags": [
+          "调用日志"
+        ],
         "summary": "调用日志详情",
         "description": "`requestBody` 与 `responseBody` 是 **JSON 字符串**，不是对象，前端要二次 `JSON.parse`。\n\n`eventType === \"chat\"` 时 `responseBody` 再解析一次：解析结果带 `code` 与 `data` 就直接用，否则包成 `{ code: responseCode, data: <解析结果> }`。\n\n### 详情抽屉按 eventType 取哪些字段\n\n通用字段（每条日志都有）：`status`、`duration`、`traceId`、`userId`、`agentId`、`createTime`、`requestTokens`、`responseTokens`、`requestCode`、`responseCode`、`eventType`。\n\n各类型额外读取的路径（点号分隔，`requestBody` / `responseBody` 解析后的字段）：\n\n| eventType | 请求 | 响应 |\n|---|---|---|\n| `addMessage` | `async_mode` `conversation_id` `allow_memory_view` `messages` `info` | `code` `data.memory_views` `message` |\n| `addFeedback` | `feedback_target` `profile_id` `attr_id` `feedback_content` `feedback_time` | `code` `data.memory_views` `message` |\n| `searchMemory` | `conversation_id` `conversationId` `query` `include_memory_view` `memory_limit_number` `includePreference` `preferenceLimitNumber` `includeToolMemory` `toolMemoryLimitNumber` `includeSkill` `skillLimitNumber` `knowledgebase_ids` `filter` | `code` `data` `message` |\n| `getMessage` | `message_limit_number` | `code` `data.message_detail_list` `message` |\n| `getMemory` | `page` `size` `filter` `include_memory_view` | `code` `data` `message` |\n| `deleteMemory` | `memory_ids` `message_id` | `code` `data` `message` |\n| `manualAddMemory` | `memory_view` `add_time` `algorithm_updatable` `content` | `code` `data` `message` |\n| `updateMemory` | `memory_id` `title` `algorithm_updatable` `content` | `code` `data` `message` |\n| `bindProfileTemplate` | `bind_list` | `code` `message` |\n| `editProfile` | `profile_template_id` `metadata` `remove_fields` | `code` `message` |\n| `deleteProfile` | `profile_template_id` | `code` `message` |\n| `chat` | `conversation_id` `knowledgebase_ids` `query` `filter` `base_prompt` `model_name` `include_preference` `add_message_on_answer` | `code` `data.response` `message` |\n| `extractMemory` | `messages` `extraction_types` | `code` `message`、`data.choices.0.message.content` |\n| `rerank` | `model` `query` `documents` `top_n` | `code` `data.results` `message` |\n\n请求体里的键名风格不统一，既有下划线（`conversation_id`）也有驼峰（`conversationId`），`searchMemory` 两种都会去取。",
         "requestBody": {
@@ -259,20 +449,30 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["logId"],
-                "properties": { "logId": { "type": "string" } }
+                "required": [
+                  "logId"
+                ],
+                "properties": {
+                  "logId": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/LogDetail" }
+          "200": {
+            "$ref": "#/components/responses/LogDetail"
+          }
         }
       }
     },
     "/api/dashboard/project/memory/list": {
       "post": {
-        "tags": ["记忆"],
+        "tags": [
+          "记忆"
+        ],
         "summary": "记忆分页列表",
         "description": "列表键是 `memListItemResponseList`，不是 `records`。\n\n`memoryDetailType` 决定返回哪一类记忆，取值见 `MemoryDetailType`。",
         "requestBody": {
@@ -281,31 +481,60 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["projectId", "memoryDetailType"],
+                "required": [
+                  "projectId",
+                  "memoryDetailType"
+                ],
                 "properties": {
-                  "projectId": { "type": "string" },
-                  "memoryDetailType": { "$ref": "#/components/schemas/MemoryDetailType" },
-                  "pageNum": { "type": "integer", "default": 1 },
-                  "pageSize": { "type": "integer", "default": 50 },
-                  "knowledgeBaseId": { "type": "string" },
-                  "startTime": { "type": "string" },
-                  "endTime": { "type": "string" },
-                  "externalUserId": { "type": "string" },
-                  "subjectType": { "$ref": "#/components/schemas/MemorySubjectType" },
-                  "memSearchContent": { "type": "string" }
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "memoryDetailType": {
+                    "$ref": "#/components/schemas/MemoryDetailType"
+                  },
+                  "pageNum": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "pageSize": {
+                    "type": "integer",
+                    "default": 50
+                  },
+                  "knowledgeBaseId": {
+                    "type": "string"
+                  },
+                  "startTime": {
+                    "type": "string"
+                  },
+                  "endTime": {
+                    "type": "string"
+                  },
+                  "externalUserId": {
+                    "type": "string"
+                  },
+                  "subjectType": {
+                    "$ref": "#/components/schemas/MemorySubjectType"
+                  },
+                  "memSearchContent": {
+                    "type": "string"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/MemoryList" }
+          "200": {
+            "$ref": "#/components/responses/MemoryList"
+          }
         }
       }
     },
     "/api/dashboard/project/memory/detail": {
       "post": {
-        "tags": ["记忆"],
+        "tags": [
+          "记忆"
+        ],
         "summary": "记忆详情",
         "requestBody": {
           "required": true,
@@ -313,23 +542,34 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["memoryId", "memType"],
+                "required": [
+                  "memoryId",
+                  "memType"
+                ],
                 "properties": {
-                  "memoryId": { "type": "string" },
-                  "memType": { "$ref": "#/components/schemas/MemoryDetailType" }
+                  "memoryId": {
+                    "type": "string"
+                  },
+                  "memType": {
+                    "$ref": "#/components/schemas/MemoryDetailType"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/Memory" }
+          "200": {
+            "$ref": "#/components/responses/Memory"
+          }
         }
       }
     },
     "/api/dashboard/project/memory/delete": {
       "post": {
-        "tags": ["记忆"],
+        "tags": [
+          "记忆"
+        ],
         "summary": "批量删除记忆",
         "requestBody": {
           "required": true,
@@ -337,23 +577,36 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["memory_ids"],
+                "required": [
+                  "memory_ids"
+                ],
                 "properties": {
-                  "memory_ids": { "type": "array", "items": { "type": "string" } },
-                  "memType": { "$ref": "#/components/schemas/MemoryDetailType" }
+                  "memory_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "memType": {
+                    "$ref": "#/components/schemas/MemoryDetailType"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/DeleteResult" }
+          "200": {
+            "$ref": "#/components/responses/DeleteResult"
+          }
         }
       }
     },
     "/api/dashboard/knowledgebase/list": {
       "post": {
-        "tags": ["知识库"],
+        "tags": [
+          "知识库"
+        ],
         "summary": "知识库分页列表",
         "requestBody": {
           "required": true,
@@ -362,23 +615,37 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "pageNum": { "type": "integer", "default": 1 },
-                  "pageSize": { "type": "integer", "default": 10 },
-                  "name": { "type": "string" },
-                  "projectId": { "type": "string" }
+                  "pageNum": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "pageSize": {
+                    "type": "integer",
+                    "default": 10
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "projectId": {
+                    "type": "string"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/KnowledgeBaseRecords" }
+          "200": {
+            "$ref": "#/components/responses/KnowledgeBaseRecords"
+          }
         }
       }
     },
     "/api/dashboard/knowledgebase/create": {
       "post": {
-        "tags": ["知识库"],
+        "tags": [
+          "知识库"
+        ],
         "summary": "新建知识库",
         "requestBody": {
           "required": true,
@@ -386,24 +653,39 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["knowledgebaseName"],
+                "required": [
+                  "knowledgebaseName"
+                ],
                 "properties": {
-                  "knowledgebaseName": { "type": "string" },
-                  "knowledgebaseDescription": { "type": "string" },
-                  "projectIds": { "type": "array", "items": { "type": "string" } }
+                  "knowledgebaseName": {
+                    "type": "string"
+                  },
+                  "knowledgebaseDescription": {
+                    "type": "string"
+                  },
+                  "projectIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/KnowledgeBase" }
+          "200": {
+            "$ref": "#/components/responses/KnowledgeBase"
+          }
         }
       }
     },
     "/api/dashboard/knowledgebase/update": {
       "post": {
-        "tags": ["知识库"],
+        "tags": [
+          "知识库"
+        ],
         "summary": "更新知识库",
         "requestBody": {
           "required": true,
@@ -411,25 +693,42 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["id"],
+                "required": [
+                  "id"
+                ],
                 "properties": {
-                  "id": { "type": "string" },
-                  "knowledgebaseName": { "type": "string" },
-                  "knowledgebaseDescription": { "type": "string" },
-                  "projectIds": { "type": "array", "items": { "type": "string" } }
+                  "id": {
+                    "type": "string"
+                  },
+                  "knowledgebaseName": {
+                    "type": "string"
+                  },
+                  "knowledgebaseDescription": {
+                    "type": "string"
+                  },
+                  "projectIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/KnowledgeBase" }
+          "200": {
+            "$ref": "#/components/responses/KnowledgeBase"
+          }
         }
       }
     },
     "/api/dashboard/knowledgebase/detail": {
       "post": {
-        "tags": ["知识库"],
+        "tags": [
+          "知识库"
+        ],
         "summary": "知识库详情",
         "requestBody": {
           "required": true,
@@ -437,20 +736,30 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["knowledgeBaseId"],
-                "properties": { "knowledgeBaseId": { "type": "string" } }
+                "required": [
+                  "knowledgeBaseId"
+                ],
+                "properties": {
+                  "knowledgeBaseId": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/KnowledgeBase" }
+          "200": {
+            "$ref": "#/components/responses/KnowledgeBase"
+          }
         }
       }
     },
     "/api/dashboard/knowledgebase/file/list": {
       "post": {
-        "tags": ["知识库"],
+        "tags": [
+          "知识库"
+        ],
         "summary": "知识库文档列表",
         "requestBody": {
           "required": true,
@@ -458,29 +767,53 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["knowledgeBaseId"],
+                "required": [
+                  "knowledgeBaseId"
+                ],
                 "properties": {
-                  "knowledgeBaseId": { "type": "string" },
-                  "pageNum": { "type": "integer", "default": 1 },
-                  "pageSize": { "type": "integer", "default": 10 },
-                  "fileName": { "type": "string" },
-                  "type": { "type": "string" },
-                  "status": { "$ref": "#/components/schemas/DocumentStatus" },
-                  "startTime": { "type": "string" },
-                  "endTime": { "type": "string" }
+                  "knowledgeBaseId": {
+                    "type": "string"
+                  },
+                  "pageNum": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "pageSize": {
+                    "type": "integer",
+                    "default": 10
+                  },
+                  "fileName": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "$ref": "#/components/schemas/DocumentStatus"
+                  },
+                  "startTime": {
+                    "type": "string"
+                  },
+                  "endTime": {
+                    "type": "string"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/UntypedRecords" }
+          "200": {
+            "$ref": "#/components/responses/UntypedRecords"
+          }
         }
       }
     },
     "/api/dashboard/knowledgebase/memory/list": {
       "post": {
-        "tags": ["知识库"],
+        "tags": [
+          "知识库"
+        ],
         "summary": "知识库的记忆列表",
         "description": "比其它列表多一个 `size` 字段。",
         "requestBody": {
@@ -489,29 +822,53 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["knowledgeBaseId"],
+                "required": [
+                  "knowledgeBaseId"
+                ],
                 "properties": {
-                  "knowledgeBaseId": { "type": "string" },
-                  "pageNum": { "type": "integer", "default": 1 },
-                  "pageSize": { "type": "integer", "default": 10 },
-                  "query": { "type": "string" },
-                  "userId": { "type": "string" },
-                  "triggerType": { "type": "string" },
-                  "startTime": { "type": "string" },
-                  "endTime": { "type": "string" }
+                  "knowledgeBaseId": {
+                    "type": "string"
+                  },
+                  "pageNum": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "pageSize": {
+                    "type": "integer",
+                    "default": 10
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "userId": {
+                    "type": "string"
+                  },
+                  "triggerType": {
+                    "type": "string"
+                  },
+                  "startTime": {
+                    "type": "string"
+                  },
+                  "endTime": {
+                    "type": "string"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/MemoryRecords" }
+          "200": {
+            "$ref": "#/components/responses/MemoryRecords"
+          }
         }
       }
     },
     "/api/dashboard/knowledgebase/project/associate": {
       "post": {
-        "tags": ["知识库"],
+        "tags": [
+          "知识库"
+        ],
         "summary": "把知识库关联到项目",
         "description": "传的是该项目的**全量**知识库 id 列表，不在列表里的会被解除关联。",
         "requestBody": {
@@ -520,23 +877,37 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["projectId", "knowledgeBaseIds"],
+                "required": [
+                  "projectId",
+                  "knowledgeBaseIds"
+                ],
                 "properties": {
-                  "projectId": { "type": "string" },
-                  "knowledgeBaseIds": { "type": "array", "items": { "type": "string" } }
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "knowledgeBaseIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
         }
       }
     },
     "/api/dashboard/knowledgebase/project/remove": {
       "post": {
-        "tags": ["知识库"],
+        "tags": [
+          "知识库"
+        ],
         "summary": "解除知识库与项目的关联",
         "requestBody": {
           "required": true,
@@ -544,24 +915,38 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["projectId", "knowledgeBaseId"],
+                "required": [
+                  "projectId",
+                  "knowledgeBaseId"
+                ],
                 "properties": {
-                  "projectId": { "type": "string" },
-                  "knowledgeBaseId": { "type": "string" },
-                  "deleteAll": { "type": "boolean", "description": "为真时连同知识库本身一起删除" }
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "knowledgeBaseId": {
+                    "type": "string"
+                  },
+                  "deleteAll": {
+                    "type": "boolean",
+                    "description": "为真时连同知识库本身一起删除"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
         }
       }
     },
     "/api/dashboard/profileTemplate/list": {
       "post": {
-        "tags": ["属性树模板"],
+        "tags": [
+          "属性树模板"
+        ],
         "summary": "属性树模板分页列表",
         "description": "列表键是 `list`，不是 `records`，且多一个 `pages`。空态是 `{ current: 1, size, total: 0, pages: 0, list: [] }`。",
         "requestBody": {
@@ -570,72 +955,116 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["projectId"],
+                "required": [
+                  "projectId"
+                ],
                 "properties": {
-                  "projectId": { "type": "string" },
-                  "pageNum": { "type": "integer", "default": 1 },
-                  "pageSize": { "type": "integer", "default": 10 }
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "pageNum": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "pageSize": {
+                    "type": "integer",
+                    "default": 10
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/ProfileTemplateList" }
+          "200": {
+            "$ref": "#/components/responses/ProfileTemplateList"
+          }
         }
       }
     },
     "/api/dashboard/profileTemplate/detail": {
       "get": {
-        "tags": ["属性树模板"],
+        "tags": [
+          "属性树模板"
+        ],
         "summary": "属性树模板详情",
         "description": "少数 GET 之一，参数走 query。",
         "parameters": [
-          { "name": "templateId", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "projectId", "in": "query", "required": true, "schema": { "type": "string" } }
+          {
+            "name": "templateId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "projectId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/ProfileTemplate" }
+          "200": {
+            "$ref": "#/components/responses/ProfileTemplate"
+          }
         }
       }
     },
     "/api/dashboard/profileTemplate/create": {
       "post": {
-        "tags": ["属性树模板"],
+        "tags": [
+          "属性树模板"
+        ],
         "summary": "新建属性树模板",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/ProfileTemplate" }
+              "schema": {
+                "$ref": "#/components/schemas/ProfileTemplate"
+              }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
         }
       }
     },
     "/api/dashboard/profileTemplate/update": {
       "post": {
-        "tags": ["属性树模板"],
+        "tags": [
+          "属性树模板"
+        ],
         "summary": "更新属性树模板",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/ProfileTemplate" }
+              "schema": {
+                "$ref": "#/components/schemas/ProfileTemplate"
+              }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
         }
       }
     },
     "/api/dashboard/profileTemplate/delete": {
       "post": {
-        "tags": ["属性树模板"],
+        "tags": [
+          "属性树模板"
+        ],
         "summary": "删除属性树模板",
         "requestBody": {
           "required": true,
@@ -643,40 +1072,57 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["projectId", "templateId"],
+                "required": [
+                  "projectId",
+                  "templateId"
+                ],
                 "properties": {
-                  "projectId": { "type": "string" },
-                  "templateId": { "type": "string" }
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "templateId": {
+                    "type": "string"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
         }
       }
     },
     "/api/dashboard/prompt-config/detail": {
       "post": {
-        "tags": ["自定义抽取"],
+        "tags": [
+          "自定义抽取"
+        ],
         "summary": "读取抽取 Prompt",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/ProjectScopedRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/ProjectScopedRequest"
+              }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/PromptConfig" }
+          "200": {
+            "$ref": "#/components/responses/PromptConfig"
+          }
         }
       }
     },
     "/api/dashboard/prompt-config/save": {
       "post": {
-        "tags": ["自定义抽取"],
+        "tags": [
+          "自定义抽取"
+        ],
         "summary": "保存抽取 Prompt",
         "requestBody": {
           "required": true,
@@ -684,95 +1130,17 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  { "$ref": "#/components/schemas/ProjectScopedRequest" },
+                  {
+                    "$ref": "#/components/schemas/ProjectScopedRequest"
+                  },
                   {
                     "type": "object",
-                    "required": ["prompt"],
-                    "properties": { "prompt": { "type": "string" } }
-                  }
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": { "$ref": "#/components/responses/Ok" }
-        }
-      }
-    },
-    "/api/dashboard/prompt-config/generate": {
-      "post": {
-        "tags": ["自定义抽取"],
-        "summary": "按一句话描述生成 Prompt",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "allOf": [
-                  { "$ref": "#/components/schemas/ProjectScopedRequest" },
-                  {
-                    "type": "object",
-                    "required": ["description"],
-                    "properties": { "description": { "type": "string" } }
-                  }
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": { "$ref": "#/components/responses/Prompt" }
-        }
-      }
-    },
-    "/api/dashboard/prompt-config/reset-default": {
-      "post": {
-        "tags": ["自定义抽取"],
-        "summary": "恢复默认 Prompt",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": { "$ref": "#/components/schemas/ProjectScopedRequest" }
-            }
-          }
-        },
-        "responses": {
-          "200": { "$ref": "#/components/responses/Prompt" }
-        }
-      }
-    },
-    "/api/dashboard/prompt-config/debug/extract": {
-      "post": {
-        "tags": ["自定义抽取"],
-        "summary": "快速调试：对一段文本跑抽取",
-        "description": "`messages` 是标准的 chat 消息数组，前端传一条 `user` 消息。",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "allOf": [
-                  { "$ref": "#/components/schemas/ProjectScopedRequest" },
-                  {
-                    "type": "object",
-                    "required": ["messages"],
+                    "required": [
+                      "prompt"
+                    ],
                     "properties": {
-                      "messages": {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "required": ["role", "content"],
-                          "properties": {
-                            "role": { "type": "string", "enum": ["system", "user", "assistant"] },
-                            "content": { "type": "string" }
-                          }
-                        }
-                      },
-                      "extractionTypes": {
-                        "type": "array",
-                        "items": { "$ref": "#/components/schemas/MemoryDetailType" }
+                      "prompt": {
+                        "type": "string"
                       }
                     }
                   }
@@ -782,13 +1150,143 @@
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/ExtractDebug" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/api/dashboard/prompt-config/generate": {
+      "post": {
+        "tags": [
+          "自定义抽取"
+        ],
+        "summary": "按一句话描述生成 Prompt",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/ProjectScopedRequest"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "description"
+                    ],
+                    "properties": {
+                      "description": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Prompt"
+          }
+        }
+      }
+    },
+    "/api/dashboard/prompt-config/reset-default": {
+      "post": {
+        "tags": [
+          "自定义抽取"
+        ],
+        "summary": "恢复默认 Prompt",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectScopedRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Prompt"
+          }
+        }
+      }
+    },
+    "/api/dashboard/prompt-config/debug/extract": {
+      "post": {
+        "tags": [
+          "自定义抽取"
+        ],
+        "summary": "快速调试：对一段文本跑抽取",
+        "description": "`messages` 是标准的 chat 消息数组，前端传一条 `user` 消息。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/ProjectScopedRequest"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "messages"
+                    ],
+                    "properties": {
+                      "messages": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "required": [
+                            "role",
+                            "content"
+                          ],
+                          "properties": {
+                            "role": {
+                              "type": "string",
+                              "enum": [
+                                "system",
+                                "user",
+                                "assistant"
+                              ]
+                            },
+                            "content": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      },
+                      "extractionTypes": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/MemoryDetailType"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ExtractDebug"
+          }
         }
       }
     },
     "/api/dashboard/usage/query": {
       "post": {
-        "tags": ["用量"],
+        "tags": [
+          "用量"
+        ],
         "summary": "按天聚合的用量",
         "description": "`projectId` 传 `\"all\"` 时会被改写成空串再发出。`startDate` / `endDate` 格式 `YYYY-MM-DD`，默认当月 1 号到今天。\n\n`dailyStats` 的每项里，`extractMemory` 与 `rerank` 可能缺失，前端用可选链读。响应里除 `dailyStats` 外的字段前端没有读取。",
         "requestBody": {
@@ -797,26 +1295,46 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["projectId"],
+                "required": [
+                  "projectId"
+                ],
                 "properties": {
-                  "projectId": { "type": "string", "description": "传 \"all\" 表示全部" },
-                  "apiKeyId": { "type": "string" },
-                  "startDate": { "type": "string", "format": "date" },
-                  "endDate": { "type": "string", "format": "date" },
-                  "includeDailyDetails": { "type": "boolean", "default": true }
+                  "projectId": {
+                    "type": "string",
+                    "description": "传 \"all\" 表示全部"
+                  },
+                  "apiKeyId": {
+                    "type": "string"
+                  },
+                  "startDate": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "endDate": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "includeDailyDetails": {
+                    "type": "boolean",
+                    "default": true
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/UsageQuery" }
+          "200": {
+            "$ref": "#/components/responses/UsageQuery"
+          }
         }
       }
     },
     "/api/dashboard/skill/skillMD": {
       "post": {
-        "tags": ["技能"],
+        "tags": [
+          "技能"
+        ],
         "summary": "取技能包 Markdown",
         "requestBody": {
           "required": true,
@@ -824,30 +1342,53 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["oss_url"],
-                "properties": { "oss_url": { "type": "string" } }
+                "required": [
+                  "oss_url"
+                ],
+                "properties": {
+                  "oss_url": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/StringData" }
+          "200": {
+            "$ref": "#/components/responses/StringData"
+          }
         }
       }
     },
     "/api/user/quota/summary": {
       "get": {
-        "tags": ["账号"],
+        "tags": [
+          "账号"
+        ],
         "summary": "额度概览",
-        "parameters": [{ "name": "knowledgebaseId", "in": "query", "required": false, "schema": { "type": "string" } }],
+        "parameters": [
+          {
+            "name": "knowledgebaseId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
-          "200": { "$ref": "#/components/responses/QuotaSummary" }
+          "200": {
+            "$ref": "#/components/responses/QuotaSummary"
+          }
         }
       }
     },
     "/api/user/subscription/details": {
       "post": {
-        "tags": ["账号"],
+        "tags": [
+          "账号"
+        ],
         "summary": "订阅周期",
         "requestBody": {
           "required": true,
@@ -856,25 +1397,828 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "cycleId": { "type": "string" },
-                  "includeAllCycles": { "type": "boolean" }
+                  "cycleId": {
+                    "type": "string"
+                  },
+                  "includeAllCycles": {
+                    "type": "boolean"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "$ref": "#/components/responses/SubscriptionDetails" }
+          "200": {
+            "$ref": "#/components/responses/SubscriptionDetails"
+          }
         }
       }
     },
     "/api/meta": {
       "get": {
-        "tags": ["运行信息"],
+        "tags": [
+          "运行信息"
+        ],
         "summary": "控制台运行信息",
         "description": "控制台自有的扩展接口，用于在界面上标注当前数据来源、密钥前缀与可用工具。",
         "responses": {
-          "200": { "$ref": "#/components/responses/Meta" }
+          "200": {
+            "$ref": "#/components/responses/Meta"
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "当前登录主体",
+        "description": "返回账号、平台管理员标记、当前项目与可访问项目列表。",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Account"
+          }
+        }
+      }
+    },
+    "/api/dashboard/project/delete/{id}": {
+      "post": {
+        "tags": [
+          "项目"
+        ],
+        "summary": "归档项目（软删除）",
+        "description": "团队项目删除后进入归档态，可在项目列表恢复；上游记忆不删。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ProjectArchive"
+          }
+        }
+      }
+    },
+    "/api/dashboard/project/restore/{id}": {
+      "post": {
+        "tags": [
+          "项目"
+        ],
+        "summary": "恢复已归档项目",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Project"
+          }
+        }
+      }
+    },
+    "/api/dashboard/keys/rename/{id}": {
+      "post": {
+        "tags": [
+          "接口密钥"
+        ],
+        "summary": "重命名密钥",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "keyName"
+                ],
+                "properties": {
+                  "keyName": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ApiKey"
+          }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/delete": {
+      "post": {
+        "tags": [
+          "知识库"
+        ],
+        "summary": "删除知识库",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "projectId",
+                  "knowledgeBaseId"
+                ],
+                "properties": {
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "knowledgeBaseId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/KnowledgeBaseDelete"
+          }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/file/add": {
+      "post": {
+        "tags": [
+          "知识库"
+        ],
+        "summary": "添加知识库文件",
+        "description": "文件内容以 data URL 或纯文本放在 `file.content` 里。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "projectId",
+                  "knowledgeBaseId",
+                  "file"
+                ],
+                "properties": {
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "knowledgeBaseId": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "content"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "content": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/KnowledgeFileRecords"
+          }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/file/delete": {
+      "post": {
+        "tags": [
+          "知识库"
+        ],
+        "summary": "删除知识库文件",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "projectId",
+                  "fileIds"
+                ],
+                "properties": {
+                  "projectId": {
+                    "type": "string"
+                  },
+                  "fileIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/KnowledgeFileDelete"
+          }
+        }
+      }
+    },
+    "/api/dashboard/knowledgebase/file/download": {
+      "get": {
+        "tags": [
+          "知识库"
+        ],
+        "summary": "下载知识库文件",
+        "description": "直接返回文件字节，不套统一返回格式。",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fileId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/FileDownload"
+          }
+        }
+      }
+    },
+    "/api/dashboard/graph/memories": {
+      "get": {
+        "tags": [
+          "图谱"
+        ],
+        "summary": "记忆星座图",
+        "description": "只读视图，参数放 query，便于直接打开或重放。",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "租户；留空用当前项目"
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "逗号分隔的记忆类型"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "节点上限"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/GraphMemoryGraph"
+          }
+        }
+      }
+    },
+    "/api/dashboard/graph/memory": {
+      "get": {
+        "tags": [
+          "图谱"
+        ],
+        "summary": "单条记忆全文",
+        "description": "与图谱节点同源，供抽屉里的「展开全文」使用。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/GraphMemory"
+          }
+        }
+      }
+    },
+    "/api/dashboard/models": {
+      "get": {
+        "tags": [
+          "模型"
+        ],
+        "summary": "模型清单",
+        "description": "返回上游实际生效的模型配置，不是前端静态副本。",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ModelRecords"
+          }
+        }
+      }
+    },
+    "/admin/accounts": {
+      "get": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "账号分页列表",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "按用户名或显示名搜索"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminAccountRecords"
+          }
+        }
+      }
+    },
+    "/admin/accounts/{id}": {
+      "post": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "更新账号",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "display_name": {
+                    "type": "string"
+                  },
+                  "disabled": {
+                    "type": "boolean"
+                  },
+                  "platform_admin": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminAccount"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "删除账号",
+        "description": "个人项目与成员关系一起删；团队 Key / 邀请保留但清空创建者。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/admin/tenants/{tenantId}/members": {
+      "get": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "项目成员列表",
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ProjectMemberRecords"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "添加成员或修改角色",
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "account_id": {
+                    "type": "string"
+                  },
+                  "username": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/MemberSet"
+          }
+        }
+      }
+    },
+    "/admin/tenants/{tenantId}/members/{accountId}/remove": {
+      "post": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "移除成员",
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "accountId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/admin/tenants/{tenantId}/members/leave": {
+      "post": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "自己退出项目",
+        "description": "不需要管理权限；最后一个 owner 会被后端拒绝。",
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/admin/tenants/{tenantId}/member-candidates": {
+      "get": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "可加入成员候选",
+        "description": "`@` 搜索可加入的人；只有项目 owner 能调。",
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/MemberCandidateRecords"
+          }
+        }
+      }
+    },
+    "/admin/tenants/{tenantId}/invites": {
+      "get": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "邀请列表",
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ProjectInviteRecords"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "创建邀请",
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "expiresIn": {
+                    "type": "string",
+                    "description": "例如 `168h`；留空用后端默认值"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/CreatedInvite"
+          }
+        }
+      }
+    },
+    "/admin/tenants/{tenantId}/invites/{inviteId}/revoke": {
+      "post": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "撤销邀请",
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inviteId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/admin/tenants/{tenantId}/invites/{inviteId}/role": {
+      "post": {
+        "tags": [
+          "账号"
+        ],
+        "summary": "修改邀请角色",
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inviteId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/InviteRole"
+          }
         }
       }
     }
@@ -883,42 +2227,123 @@
     "schemas": {
       "Envelope": {
         "type": "object",
-        "required": ["code", "message"],
+        "required": [
+          "code",
+          "message"
+        ],
         "properties": {
-          "code": { "type": "integer", "description": "0 表示成功；非 0 时前端按错误处理并弹出 message" },
-          "message": { "type": "string" },
+          "code": {
+            "type": "integer",
+            "description": "0 表示成功；非 0 时前端按错误处理并弹出 message"
+          },
+          "message": {
+            "type": "string"
+          },
           "data": {}
         }
       },
       "Project": {
         "type": "object",
-        "required": ["id", "name"],
+        "required": [
+          "id",
+          "name"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "name": { "type": "string" },
-          "description": { "type": "string" },
-          "status": { "type": "string", "enum": ["ENABLED", "DISABLED"], "description": "`ENABLED` 的那条是当前项目" },
-          "createTime": { "type": "string" },
-          "isMultiView": { "type": "integer", "enum": [0, 1] }
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ENABLED",
+              "DISABLED"
+            ],
+            "description": "`ENABLED` 的那条是当前项目"
+          },
+          "createTime": {
+            "type": "string"
+          },
+          "isMultiView": {
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ]
+          },
+          "role": {
+            "type": "string",
+            "description": "当前账号在这个项目里的角色"
+          },
+          "disabled": {
+            "type": "boolean",
+            "description": "项目已被管理员停用"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "team",
+              "personal"
+            ]
+          },
+          "archived": {
+            "type": "boolean",
+            "description": "已归档（软删除），可恢复"
+          },
+          "archivedAt": {
+            "type": "string"
+          }
         }
       },
       "ProjectDictItem": {
         "type": "object",
-        "required": ["id", "name"],
+        "required": [
+          "id",
+          "name"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "name": { "type": "string" },
-          "status": { "type": "string", "enum": ["ENABLED", "DISABLED"] }
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ENABLED",
+              "DISABLED"
+            ]
+          }
         }
       },
       "ApiKey": {
         "type": "object",
-        "required": ["id", "keyName", "apiKey", "createTime"],
+        "required": [
+          "id",
+          "keyName",
+          "apiKey",
+          "createTime"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "keyName": { "type": "string" },
-          "apiKey": { "type": "string", "description": "完整密钥，列表里也下发，前端自己截断展示" },
-          "createTime": { "type": "string" }
+          "id": {
+            "type": "string"
+          },
+          "keyName": {
+            "type": "string"
+          },
+          "apiKey": {
+            "type": "string",
+            "description": "完整密钥，列表里也下发，前端自己截断展示"
+          },
+          "createTime": {
+            "type": "string"
+          }
         }
       },
       "EventType": {
@@ -947,148 +2372,369 @@
       },
       "RequestLog": {
         "type": "object",
-        "required": ["id", "createTime", "eventType", "status"],
+        "required": [
+          "id",
+          "createTime",
+          "eventType",
+          "status"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "createTime": { "type": "string" },
-          "eventType": { "$ref": "#/components/schemas/EventType" },
-          "userIds": { "type": "array", "items": { "type": "string" } },
-          "agentIds": { "type": "array", "items": { "type": "string" } },
-          "status": { "$ref": "#/components/schemas/LogStatus" },
-          "duration": { "type": "number", "description": "毫秒数，前端拼 `ms` 展示" }
+          "id": {
+            "type": "string"
+          },
+          "createTime": {
+            "type": "string"
+          },
+          "eventType": {
+            "$ref": "#/components/schemas/EventType"
+          },
+          "userIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "agentIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/LogStatus"
+          },
+          "duration": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "毫秒数；异步 add 还没跑完时是 null"
+          },
+          "callId": {
+            "type": "string",
+            "description": "异步 add 的请求行与终态行的关联 ID"
+          },
+          "requestTokens": {
+            "type": "integer"
+          },
+          "responseTokens": {
+            "type": "integer"
+          }
         }
       },
       "LogDetail": {
         "type": "object",
-        "required": ["id", "createTime", "eventType", "status"],
+        "required": [
+          "id",
+          "createTime",
+          "eventType",
+          "status"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "createTime": { "type": "string" },
-          "eventType": { "$ref": "#/components/schemas/EventType" },
-          "status": { "$ref": "#/components/schemas/LogStatus" },
-          "duration": { "type": "number" },
-          "traceId": { "type": "string" },
-          "userId": { "type": "string" },
-          "agentId": { "type": "string" },
-          "requestTokens": { "type": "integer" },
-          "responseTokens": { "type": "integer" },
-          "requestCode": { "type": "integer" },
-          "responseCode": { "type": "integer" },
-          "requestBody": { "type": "string", "description": "JSON 字符串，前端二次 parse" },
-          "responseBody": { "type": "string", "description": "JSON 字符串，前端二次 parse" }
+          "id": {
+            "type": "string"
+          },
+          "createTime": {
+            "type": "string"
+          },
+          "eventType": {
+            "$ref": "#/components/schemas/EventType"
+          },
+          "status": {
+            "$ref": "#/components/schemas/LogStatus"
+          },
+          "duration": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "agentId": {
+            "type": "string"
+          },
+          "requestTokens": {
+            "type": "integer"
+          },
+          "responseTokens": {
+            "type": "integer"
+          },
+          "requestCode": {
+            "type": "integer"
+          },
+          "responseCode": {
+            "type": "integer"
+          },
+          "requestBody": {
+            "type": "string",
+            "description": "JSON 字符串，前端二次 parse"
+          },
+          "responseBody": {
+            "type": "string",
+            "description": "JSON 字符串，前端二次 parse"
+          },
+          "callId": {
+            "type": "string"
+          },
+          "llmCalls": {
+            "type": "integer",
+            "description": "上游 add 回报的 LLM 调用次数"
+          }
         }
       },
       "MemorySubjectType": {
         "type": "string",
-        "enum": ["user", "agent", "public"]
+        "enum": [
+          "user",
+          "agent",
+          "public"
+        ]
       },
       "MemoryDetailType": {
         "type": "string",
         "description": "记忆类型。`text_mem` 事实记忆、`pref_mem` 偏好记忆、`event_mem` 事件记忆、`profile_mem` 属性树记忆、`skill_mem` 技能、`tool_mem` 工具记忆。",
-        "enum": ["text_mem", "pref_mem", "event_mem", "profile_mem", "skill_mem", "tool_mem"]
+        "enum": [
+          "text_mem",
+          "pref_mem",
+          "event_mem",
+          "profile_mem",
+          "skill_mem",
+          "tool_mem"
+        ]
       },
       "Memory": {
         "type": "object",
-        "required": ["memoryId", "memoryContent", "createTime"],
+        "required": [
+          "memoryId",
+          "memoryContent",
+          "createTime"
+        ],
         "properties": {
-          "memoryId": { "type": "string" },
-          "memoryContent": { "type": "string" },
-          "subjectType": { "$ref": "#/components/schemas/MemorySubjectType" },
-          "externalUserId": { "type": "string" },
-          "createTime": { "type": "string" },
-          "skillName": { "type": "string", "description": "`skill_mem` 专有" },
-          "skillUrl": { "type": "string", "description": "`skill_mem` 专有" },
-          "profileTemplateId": { "type": "string", "description": "`profile_mem` 专有" },
-          "profileInstanceId": { "type": "string", "description": "`profile_mem` 专有" }
+          "memoryId": {
+            "type": "string"
+          },
+          "memoryContent": {
+            "type": "string"
+          },
+          "subjectType": {
+            "$ref": "#/components/schemas/MemorySubjectType"
+          },
+          "externalUserId": {
+            "type": "string"
+          },
+          "createTime": {
+            "type": "string"
+          },
+          "skillName": {
+            "type": "string",
+            "description": "`skill_mem` 专有"
+          },
+          "skillUrl": {
+            "type": "string",
+            "description": "`skill_mem` 专有"
+          },
+          "profileTemplateId": {
+            "type": "string",
+            "description": "`profile_mem` 专有"
+          },
+          "profileInstanceId": {
+            "type": "string",
+            "description": "`profile_mem` 专有"
+          },
+          "memoryType": {
+            "type": "string",
+            "description": "上游 memory_type 原文（LongTermMemory / UserMemory / Context / InsightMemory …）"
+          }
         }
       },
       "KnowledgeBase": {
         "type": "object",
-        "required": ["kbId", "knowledgebaseName"],
+        "required": [
+          "kbId",
+          "knowledgebaseName"
+        ],
         "properties": {
-          "kbId": { "type": "string" },
-          "knowledgebaseName": { "type": "string" },
-          "knowledgebaseDescription": { "type": "string" },
-          "projectIds": { "type": "array", "items": { "type": "string" } }
+          "kbId": {
+            "type": "string"
+          },
+          "knowledgebaseName": {
+            "type": "string"
+          },
+          "knowledgebaseDescription": {
+            "type": "string"
+          },
+          "projectIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fileCount": {
+            "type": "integer"
+          },
+          "totalSize": {
+            "type": "integer"
+          },
+          "createTime": {
+            "type": "string"
+          },
+          "updateTime": {
+            "type": "string"
+          }
         }
       },
       "DocumentStatus": {
         "type": "string",
-        "enum": ["waiting", "uploading", "processing", "available", "deleting", "failed", "processFailed"]
+        "enum": [
+          "waiting",
+          "uploading",
+          "processing",
+          "available",
+          "deleting",
+          "failed",
+          "processFailed"
+        ]
       },
       "ProfileTemplateField": {
         "type": "object",
         "properties": {
-          "value": { "type": "string" },
-          "algorithm_updatable": { "type": "boolean", "description": "该字段是否允许算法自动更新" }
+          "value": {
+            "type": "string"
+          },
+          "algorithm_updatable": {
+            "type": "boolean",
+            "description": "该字段是否允许算法自动更新"
+          }
         }
       },
       "ProfileTemplateGroup": {
         "type": "object",
         "description": "分组 → 字段 → `{ value, algorithm_updatable }`",
-        "additionalProperties": { "$ref": "#/components/schemas/ProfileTemplateField" }
+        "additionalProperties": {
+          "$ref": "#/components/schemas/ProfileTemplateField"
+        }
       },
       "ProfileTemplate": {
         "type": "object",
         "description": "模板对象。除下列元信息外，其余键都当作分组数据，形状是「分组 → 字段 → `{ value, algorithm_updatable }`」。",
         "properties": {
-          "templateId": { "type": "string" },
-          "templateName": { "type": "string" },
-          "projectId": { "type": "string" },
-          "bindingCount": { "type": "integer" },
-          "updatedAt": { "type": "string" }
+          "templateId": {
+            "type": "string"
+          },
+          "templateName": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "bindingCount": {
+            "type": "integer"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
         },
-        "additionalProperties": { "$ref": "#/components/schemas/ProfileTemplateGroup" }
+        "additionalProperties": {
+          "$ref": "#/components/schemas/ProfileTemplateGroup"
+        }
       },
       "PromptConfig": {
         "type": "object",
         "properties": {
-          "prompt": { "type": "string" },
-          "projectId": { "type": "string" },
-          "updatedAt": { "type": "string" }
+          "prompt": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
         }
       },
       "ExtractResult": {
         "type": "object",
         "properties": {
-          "type": { "$ref": "#/components/schemas/MemoryDetailType" },
-          "content": { "type": "string" }
+          "type": {
+            "$ref": "#/components/schemas/MemoryDetailType"
+          },
+          "content": {
+            "type": "string"
+          }
         }
       },
       "UsageDailyStat": {
         "type": "object",
-        "required": ["date"],
+        "required": [
+          "date"
+        ],
         "properties": {
-          "date": { "type": "string", "format": "date" },
-          "addMessage": { "$ref": "#/components/schemas/UsageCalls" },
-          "searchMemory": { "$ref": "#/components/schemas/UsageCalls" },
-          "chat": { "$ref": "#/components/schemas/UsageTokens" },
-          "extractMemory": { "$ref": "#/components/schemas/UsageTokens" },
-          "rerank": { "$ref": "#/components/schemas/UsageCalls" }
+          "date": {
+            "type": "string",
+            "format": "date"
+          },
+          "addMessage": {
+            "$ref": "#/components/schemas/UsageCalls"
+          },
+          "searchMemory": {
+            "$ref": "#/components/schemas/UsageCalls"
+          },
+          "chat": {
+            "$ref": "#/components/schemas/UsageTokens"
+          },
+          "extractMemory": {
+            "$ref": "#/components/schemas/UsageTokens"
+          },
+          "rerank": {
+            "$ref": "#/components/schemas/UsageCalls"
+          }
         }
       },
       "UsageCalls": {
         "type": "object",
         "properties": {
-          "calls": { "type": "integer" },
-          "totalTokens": { "type": "integer" }
+          "calls": {
+            "type": "integer"
+          },
+          "totalTokens": {
+            "type": "integer"
+          }
         }
       },
       "UsageTokens": {
         "type": "object",
         "properties": {
-          "requestTokens": { "type": "integer" },
-          "responseTokens": { "type": "integer" },
-          "totalTokens": { "type": "integer" }
+          "requestTokens": {
+            "type": "integer"
+          },
+          "responseTokens": {
+            "type": "integer"
+          },
+          "totalTokens": {
+            "type": "integer"
+          }
         }
       },
       "QuotaSummary": {
         "type": "object",
         "properties": {
-          "memoryCount": { "type": "integer" },
-          "knowledgebaseCount": { "type": "integer" },
-          "knowledgebaseCapacity": { "type": "integer" },
-          "allowedKnowledgebaseCount": { "type": "integer" }
+          "memoryCount": {
+            "type": "integer"
+          },
+          "knowledgebaseCount": {
+            "type": "integer"
+          },
+          "knowledgebaseCapacity": {
+            "type": "integer"
+          },
+          "allowedKnowledgebaseCount": {
+            "type": "integer"
+          }
         }
       },
       "SubscriptionDetails": {
@@ -1099,15 +2745,25 @@
             "items": {
               "type": "object",
               "properties": {
-                "id": { "type": "string" },
-                "cycleStartTime": { "type": "string" },
-                "cycleEndTime": { "type": "string" }
+                "id": {
+                  "type": "string"
+                },
+                "cycleStartTime": {
+                  "type": "string"
+                },
+                "cycleEndTime": {
+                  "type": "string"
+                }
               }
             }
           },
           "currentCycle": {
             "type": "object",
-            "properties": { "id": { "type": "string" } }
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            }
           }
         }
       },
@@ -1115,24 +2771,516 @@
         "type": "object",
         "description": "服务暴露的一个 MCP 工具，接入说明与示例命令据此生成",
         "properties": {
-          "name": { "type": "string" },
-          "description": { "type": "string" }
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
         }
       },
       "Meta": {
         "type": "object",
-        "required": ["mode", "keyPrefix", "tools"],
+        "required": [
+          "mode",
+          "keyPrefix",
+          "tools"
+        ],
         "properties": {
-          "mode": { "type": "string", "enum": ["sample", "live"], "description": "`sample` 示例后端，`live` 真实后端" },
-          "service": { "type": "string" },
-          "health": { "type": ["object", "null"] },
-          "keyPrefix": { "type": "string", "description": "新建密钥的展示与校验用它" },
-          "tools": { "type": "array", "items": { "$ref": "#/components/schemas/ToolInfo" } }
+          "mode": {
+            "type": "string",
+            "enum": [
+              "sample",
+              "live"
+            ],
+            "description": "`sample` 示例后端，`live` 真实后端"
+          },
+          "service": {
+            "type": "string"
+          },
+          "health": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "keyPrefix": {
+            "type": "string",
+            "description": "新建密钥的展示与校验用它"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolInfo"
+            }
+          }
         }
       },
       "ProjectScopedRequest": {
         "type": "object",
-        "properties": { "projectId": { "type": "string" } }
+        "properties": {
+          "projectId": {
+            "type": "string"
+          }
+        }
+      },
+      "AccountProject": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "role"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "team",
+              "personal"
+            ]
+          }
+        }
+      },
+      "Account": {
+        "type": "object",
+        "required": [
+          "username",
+          "displayName",
+          "platformAdmin",
+          "currentProjectId",
+          "projects"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "账号 ID；管理 Token 没有账号身份时为空"
+          },
+          "username": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "platformAdmin": {
+            "type": "boolean"
+          },
+          "currentProjectId": {
+            "type": "string"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountProject"
+            }
+          }
+        }
+      },
+      "AdminAccount": {
+        "type": "object",
+        "description": "`/admin/*` 的账号对象，字段沿用 snake_case。",
+        "required": [
+          "id",
+          "username",
+          "display_name",
+          "platform_admin",
+          "disabled",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "platform_admin": {
+            "type": "boolean"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "last_login_at": {
+            "type": "string"
+          }
+        }
+      },
+      "ProjectMember": {
+        "type": "object",
+        "required": [
+          "account_id",
+          "username",
+          "display_name",
+          "disabled",
+          "role",
+          "created_at"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          }
+        }
+      },
+      "MemberCandidate": {
+        "type": "object",
+        "required": [
+          "accountId",
+          "username",
+          "displayName",
+          "disabled",
+          "member"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "member": {
+            "type": "boolean",
+            "description": "已经在项目里"
+          }
+        }
+      },
+      "ProjectInvite": {
+        "type": "object",
+        "required": [
+          "id",
+          "tenantId",
+          "role",
+          "status",
+          "createdAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "used",
+              "expired",
+              "revoked"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          },
+          "usedAt": {
+            "type": "string"
+          },
+          "usedByAccountId": {
+            "type": "string"
+          },
+          "revokedAt": {
+            "type": "string"
+          }
+        }
+      },
+      "CreatedInvite": {
+        "type": "object",
+        "description": "明文 token 只在创建响应里出现一次（放在 `path` 里），列表不返回 token。",
+        "required": [
+          "id",
+          "tenantId",
+          "role",
+          "path",
+          "createdAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "邀请落地页路径"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          }
+        }
+      },
+      "KnowledgeFile": {
+        "type": "object",
+        "required": [
+          "id",
+          "fileId",
+          "knowledgebaseId",
+          "name",
+          "size"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "fileId": {
+            "type": "string"
+          },
+          "knowledgebaseId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "sizeMB": {
+            "type": "number"
+          },
+          "createTime": {
+            "type": "string"
+          }
+        }
+      },
+      "GraphNode": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "labelTruncated",
+          "memoryType",
+          "createdAt",
+          "sessionId",
+          "clusterId",
+          "userId",
+          "sourceIds"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "description": "记忆正文的截断（≤120 字）"
+          },
+          "labelTruncated": {
+            "type": "boolean"
+          },
+          "memoryType": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "空串表示没有会话归属"
+          },
+          "clusterId": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "sourceIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "GraphLink": {
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "kind"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "session",
+              "parent",
+              "merged",
+              "derived"
+            ]
+          }
+        }
+      },
+      "MemoryGraphStats": {
+        "type": "object",
+        "required": [
+          "nodes",
+          "links",
+          "sessions",
+          "clusters",
+          "orphans",
+          "truncated",
+          "types"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "integer"
+          },
+          "links": {
+            "type": "integer"
+          },
+          "sessions": {
+            "type": "integer"
+          },
+          "clusters": {
+            "type": "integer"
+          },
+          "orphans": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "types": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "count"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      },
+      "MemoryGraph": {
+        "type": "object",
+        "required": [
+          "nodes",
+          "links",
+          "stats"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GraphNode"
+            }
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GraphLink"
+            }
+          },
+          "tenant": {
+            "type": "string",
+            "description": "实际生效的租户"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/MemoryGraphStats"
+          }
+        }
+      },
+      "ModelRecord": {
+        "type": "object",
+        "required": [
+          "role",
+          "model",
+          "spec",
+          "source",
+          "group"
+        ],
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "spec": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string",
+            "enum": [
+              "memory",
+              "chat"
+            ]
+          }
+        }
       }
     },
     "responses": {
@@ -1142,8 +3290,18 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "type": "object", "additionalProperties": true } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1154,7 +3312,19 @@
         "content": {
           "application/json": {
             "schema": {
-              "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "string" } } }]
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    }
+                  }
+                }
+              ]
             }
           }
         }
@@ -1165,13 +3335,19 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "properties": { "deleted": { "type": "integer" } }
+                      "properties": {
+                        "deleted": {
+                          "type": "integer"
+                        }
+                      }
                     }
                   }
                 }
@@ -1186,8 +3362,17 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Project" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Project"
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1199,11 +3384,18 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
-                    "data": { "type": "array", "items": { "$ref": "#/components/schemas/ProjectDictItem" } }
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ProjectDictItem"
+                      }
+                    }
                   }
                 }
               ]
@@ -1217,16 +3409,28 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "required": ["records", "total"],
+                      "required": [
+                        "records",
+                        "total"
+                      ],
                       "properties": {
-                        "records": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } },
-                        "total": { "type": "integer" }
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/Project"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
                       }
                     }
                   }
@@ -1242,8 +3446,17 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ApiKey" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/ApiKey"
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1255,16 +3468,28 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "required": ["records", "total"],
+                      "required": [
+                        "records",
+                        "total"
+                      ],
                       "properties": {
-                        "records": { "type": "array", "items": { "$ref": "#/components/schemas/ApiKey" } },
-                        "total": { "type": "integer" }
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ApiKey"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
                       }
                     }
                   }
@@ -1280,16 +3505,28 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "required": ["logs", "total"],
+                      "required": [
+                        "logs",
+                        "total"
+                      ],
                       "properties": {
-                        "logs": { "type": "array", "items": { "$ref": "#/components/schemas/RequestLog" } },
-                        "total": { "type": "integer" }
+                        "logs": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/RequestLog"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
                       }
                     }
                   }
@@ -1305,8 +3542,17 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/LogDetail" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/LogDetail"
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1318,8 +3564,17 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Memory" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Memory"
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1331,20 +3586,31 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "required": ["memListItemResponseList", "total"],
+                      "required": [
+                        "memListItemResponseList",
+                        "total"
+                      ],
                       "properties": {
                         "memListItemResponseList": {
                           "type": "array",
-                          "items": { "$ref": "#/components/schemas/Memory" }
+                          "items": {
+                            "$ref": "#/components/schemas/Memory"
+                          }
                         },
-                        "total": { "type": "integer" },
-                        "current": { "type": "integer" }
+                        "total": {
+                          "type": "integer"
+                        },
+                        "current": {
+                          "type": "integer"
+                        }
                       }
                     }
                   }
@@ -1360,17 +3626,31 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "required": ["records", "total"],
+                      "required": [
+                        "records",
+                        "total"
+                      ],
                       "properties": {
-                        "records": { "type": "array", "items": { "$ref": "#/components/schemas/Memory" } },
-                        "total": { "type": "integer" },
-                        "size": { "type": "integer" }
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/Memory"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        },
+                        "size": {
+                          "type": "integer"
+                        }
                       }
                     }
                   }
@@ -1386,16 +3666,29 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "required": ["records", "total"],
+                      "required": [
+                        "records",
+                        "total"
+                      ],
                       "properties": {
-                        "records": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-                        "total": { "type": "integer" }
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": true
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
                       }
                     }
                   }
@@ -1411,8 +3704,17 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/KnowledgeBase" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/KnowledgeBase"
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1424,16 +3726,28 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "required": ["records", "total"],
+                      "required": [
+                        "records",
+                        "total"
+                      ],
                       "properties": {
-                        "records": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBase" } },
-                        "total": { "type": "integer" }
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/KnowledgeBase"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
                       }
                     }
                   }
@@ -1449,8 +3763,17 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ProfileTemplate" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/ProfileTemplate"
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1462,19 +3785,37 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "required": ["list", "total"],
+                      "required": [
+                        "list",
+                        "total"
+                      ],
                       "properties": {
-                        "list": { "type": "array", "items": { "$ref": "#/components/schemas/ProfileTemplate" } },
-                        "total": { "type": "integer" },
-                        "current": { "type": "integer" },
-                        "size": { "type": "integer" },
-                        "pages": { "type": "integer" }
+                        "list": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ProfileTemplate"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        },
+                        "current": {
+                          "type": "integer"
+                        },
+                        "size": {
+                          "type": "integer"
+                        },
+                        "pages": {
+                          "type": "integer"
+                        }
                       }
                     }
                   }
@@ -1490,8 +3831,17 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/PromptConfig" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/PromptConfig"
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1503,13 +3853,19 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "properties": { "prompt": { "type": "string" } }
+                      "properties": {
+                        "prompt": {
+                          "type": "string"
+                        }
+                      }
                     }
                   }
                 }
@@ -1524,7 +3880,9 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
@@ -1533,11 +3891,15 @@
                       "properties": {
                         "extractionTypes": {
                           "type": "array",
-                          "items": { "$ref": "#/components/schemas/MemoryDetailType" }
+                          "items": {
+                            "$ref": "#/components/schemas/MemoryDetailType"
+                          }
                         },
                         "results": {
                           "type": "array",
-                          "items": { "$ref": "#/components/schemas/ExtractResult" }
+                          "items": {
+                            "$ref": "#/components/schemas/ExtractResult"
+                          }
                         }
                       }
                     }
@@ -1554,17 +3916,23 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
                 {
                   "type": "object",
                   "properties": {
                     "data": {
                       "type": "object",
-                      "required": ["dailyStats"],
+                      "required": [
+                        "dailyStats"
+                      ],
                       "properties": {
                         "dailyStats": {
                           "type": "array",
-                          "items": { "$ref": "#/components/schemas/UsageDailyStat" }
+                          "items": {
+                            "$ref": "#/components/schemas/UsageDailyStat"
+                          }
                         }
                       }
                     }
@@ -1581,8 +3949,17 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/QuotaSummary" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/QuotaSummary"
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1594,8 +3971,17 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/SubscriptionDetails" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SubscriptionDetails"
+                    }
+                  }
+                }
               ]
             }
           }
@@ -1607,9 +3993,547 @@
           "application/json": {
             "schema": {
               "allOf": [
-                { "$ref": "#/components/schemas/Envelope" },
-                { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Meta" } } }
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Meta"
+                    }
+                  }
+                }
               ]
+            }
+          }
+        }
+      },
+      "Account": {
+        "description": "成功，返回当前登录主体",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Account"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "AdminAccount": {
+        "description": "成功",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/AdminAccount"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "AdminAccountRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "records",
+                        "total"
+                      ],
+                      "properties": {
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/AdminAccount"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ProjectMemberRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "records",
+                        "total"
+                      ],
+                      "properties": {
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ProjectMember"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "MemberCandidateRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "records",
+                        "total"
+                      ],
+                      "properties": {
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/MemberCandidate"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ProjectInviteRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "records",
+                        "total"
+                      ],
+                      "properties": {
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ProjectInvite"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "CreatedInvite": {
+        "description": "成功，`path` 里是明文邀请链接，只此一次",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/CreatedInvite"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "KnowledgeFileRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "records",
+                        "total"
+                      ],
+                      "properties": {
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/KnowledgeFile"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "KnowledgeBaseDelete": {
+        "description": "成功，返回被删除的知识库 id",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "ok",
+                        "id"
+                      ],
+                      "properties": {
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "KnowledgeFileDelete": {
+        "description": "成功，返回删除条数",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "ok",
+                        "deleted"
+                      ],
+                      "properties": {
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "deleted": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ProjectArchive": {
+        "description": "成功，项目已归档（软删除）",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "ok",
+                        "id",
+                        "archived"
+                      ],
+                      "properties": {
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "archived": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "GraphMemoryGraph": {
+        "description": "成功，返回整张图谱",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/MemoryGraph"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "GraphMemory": {
+        "description": "成功，返回单条记忆全文",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "memory"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "memory": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "ModelRecords": {
+        "description": "成功，列表键 `records`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "records"
+                      ],
+                      "properties": {
+                        "records": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ModelRecord"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "MemberSet": {
+        "description": "成功，返回成员关系",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "account_id",
+                        "tenant_id",
+                        "role"
+                      ],
+                      "properties": {
+                        "account_id": {
+                          "type": "string"
+                        },
+                        "tenant_id": {
+                          "type": "string"
+                        },
+                        "role": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "InviteRole": {
+        "description": "成功，返回更新后的角色",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Envelope"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "ok",
+                        "role"
+                      ],
+                      "properties": {
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "role": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "FileDownload": {
+        "description": "文件内容",
+        "content": {
+          "application/octet-stream": {
+            "schema": {
+              "type": "string",
+              "format": "binary"
             }
           }
         }
