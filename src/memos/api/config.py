@@ -387,6 +387,27 @@ class APIConfig:
         # Fallback to memreader config (same behavior as before for users who don't customize)
         return APIConfig.get_memreader_config()
 
+    @staticmethod
+    def get_suggestion_llm_config() -> dict[str, Any]:
+        """Get LLM configuration for suggestion query generation.
+
+        Fallback chain: SUGGESTION_MODEL -> MEMREADER_GENERAL_MODEL -> memreader config.
+        """
+        suggestion_model = os.getenv("SUGGESTION_MODEL")
+        if suggestion_model:
+            return APIConfig._build_provider_llm_config(suggestion_model)
+        return APIConfig.get_memreader_general_llm_config()
+
+    @staticmethod
+    def get_scheduler_llm_config() -> dict[str, Any]:
+        """Get LLM configuration for scheduler-owned LLM tasks.
+
+        Fallback chain: MEMSCHEDULER_MODEL -> MEMREADER_GENERAL_MODEL.
+        """
+        scheduler_model = os.getenv("MEMSCHEDULER_MODEL")
+        if scheduler_model:
+            return APIConfig._build_provider_llm_config(scheduler_model)
+        return APIConfig.get_memreader_general_llm_config()
 
     @staticmethod
     def get_image_parser_llm_config() -> dict[str, Any]:
@@ -1098,9 +1119,9 @@ class APIConfig:
                             },
                             "search_strategy": {
                                 "fast_graph": bool(os.getenv("FAST_GRAPH", "false") == "true"),
-                                "bm25": bool(os.getenv("BM25_CALL", "false") == "true"),
-                                "cot": bool(os.getenv("VEC_COT_CALL", "false") == "true"),
-                                "fulltext": bool(os.getenv("FULLTEXT_CALL", "false") == "true"),
+                                "bm25": bool(os.getenv("BM25_CALL", "true") == "true"),
+                                "cot": bool(os.getenv("VEC_COT_CALL", "true") == "true"),
+                                "fulltext": bool(os.getenv("FULLTEXT_CALL", "true") == "true"),
                             },
                             "mode": os.getenv("ASYNC_MODE", "sync"),
                             "include_embedding": bool(

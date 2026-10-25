@@ -6,6 +6,7 @@ when using the API components. It uses ContextVar to ensure thread safety
 and request isolation.
 """
 
+import contextvars
 import functools
 import os
 import threading
@@ -192,8 +193,13 @@ class ContextThread(threading.Thread):
         self.main_user_type = get_current_user_type()
         self.main_user_name = get_current_user_name()
         self.main_context = get_current_context()
+        # Other ContextVars (e.g. the per-request extraction prompt override).
+        self._contextvars = contextvars.copy_context()
 
     def run(self):
+        self._contextvars.run(self._run_in_context)
+
+    def _run_in_context(self):
         # Create a new RequestContext with the main thread's trace_id
         if self.main_context:
             # Copy the context data
@@ -246,7 +252,10 @@ class ContextThreadPoolExecutor(ThreadPoolExecutor):
 
             return fn(*args, **kwargs)
 
-        return super().submit(wrapper, *args, **kwargs)
+        # Run inside a copy of the submitter's contextvars, so request-scoped
+        # ContextVars reach the worker and worker-side set() calls do not leak
+        # into the next task on the same thread.
+        return super().submit(contextvars.copy_context().run, wrapper, *args, **kwargs)
 
     def map(
         self,
@@ -282,7 +291,11 @@ class ContextThreadPoolExecutor(ThreadPoolExecutor):
 
             return fn(*args, **kwargs)
 
-        return super().map(wrapper, *iterables, timeout=timeout, chunksize=chunksize)
+        def run_in_context(*args: Any, **kwargs: Any) -> Any:
+            # One context copy per task: a Context cannot be entered concurrently.
+            return contextvars.copy_context().run(wrapper, *args, **kwargs)
+
+        return super().map(run_in_context, *iterables, timeout=timeout, chunksize=chunksize)
 
 
 # Type for trace_id getter function

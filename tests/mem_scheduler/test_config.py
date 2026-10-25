@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import unittest.mock
 
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -99,7 +100,7 @@ class TestEnvConfigMixin(unittest.TestCase):
         test_env_vars = {
             "OPENAI_API_KEY": "test-api-key-12345",
             "OPENAI_API_BASE": "https://api.test.openai.com/v1",
-            f"{ENV_PREFIX}OPENAI_DEFAULT_MODEL": "gpt-4",
+            f"{ENV_PREFIX}MODEL": "gpt-4",
             f"{ENV_PREFIX}RABBITMQ_HOST_NAME": "localhost",
             f"{ENV_PREFIX}RABBITMQ_PORT": "5672",
             f"{ENV_PREFIX}RABBITMQ_USER_NAME": "guest",
@@ -345,3 +346,26 @@ class TestConfigUtils(unittest.TestCase):
         expected = {"OPTIONAL": "", "REQUIRED": "present"}
 
         self.assertEqual(flatten_dict(input_dict), expected)
+
+
+class TestGraphDBBackendSelection(unittest.TestCase):
+    """G9: GRAPH_DB_BACKEND=hugegraph must build a validated config."""
+
+    def test_hugegraph_backend_builds_config_without_keyerror(self):
+        from memos.mem_scheduler.general_modules.init_components_for_scheduler import (
+            build_graph_db_config,
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "GRAPH_DB_BACKEND": "hugegraph",
+                "HUGEGRAPH_URL": "http://127.0.0.1:8802",
+                "HUGEGRAPH_GRAPHSPACE": "memos_verify",
+                "HUGEGRAPH_VECTOR_BACKEND": "none",
+            },
+        ):
+            config = build_graph_db_config(user_id="u1")
+
+        self.assertEqual(config.backend, "hugegraph")
+        self.assertEqual(config.config.graphspace, "memos_verify")

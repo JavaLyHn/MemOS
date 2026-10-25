@@ -217,3 +217,23 @@ def build_nli_client_config() -> dict[str, Any]:
         NLI client configuration dictionary
     """
     return APIConfig.get_nli_config()
+
+
+def build_suggestion_llm_config() -> dict[str, Any]:
+    """
+    Build suggestion LLM configuration.
+
+    Returns:
+        Validated suggestion LLM configuration dictionary
+    """
+    return LLMConfigFactory.model_validate(APIConfig.get_suggestion_llm_config())
+
+
+def build_scheduler_llm_config() -> dict[str, Any]:
+    """
+    Build scheduler LLM configuration.
+
+    Returns:
+        Validated scheduler LLM configuration dictionary
+    """
+    return LLMConfigFactory.model_validate(APIConfig.get_scheduler_llm_config())

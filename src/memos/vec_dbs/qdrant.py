@@ -13,6 +13,10 @@ logger = get_logger(__name__)
 class QdrantVecDB(BaseVecDB):
     """Qdrant vector database implementation."""
 
+    # Qdrant scroll can return payloads without vectors, which is what lexical
+    # indexes need; see BaseVecDB.supports_text_snapshot.
+    supports_text_snapshot = True
+
     @require_python_package(
         import_name="qdrant_client",
         install_command="pip install qdrant-client",
@@ -212,16 +216,20 @@ class QdrantVecDB(BaseVecDB):
             for point in response
         ]
 
-    def get_by_filter(self, filter: dict[str, Any], scroll_limit: int = 100) -> list[VecDBItem]:
+    def get_by_filter(
+        self, filter: dict[str, Any], scroll_limit: int = 100, with_vectors: bool = True
+    ) -> list[VecDBItem]:
         """
         Retrieve all items that match the given filter criteria.
 
         Args:
             filter: Payload filters to match against stored items
             scroll_limit: Maximum number of items to retrieve per scroll request
+            with_vectors: When False, skip embeddings entirely (payload-only
+                snapshot for lexical indexes).
 
         Returns:
-            List of items including vectors and payload that match the filter
+            List of items including vectors and payloads that match the filter
         """
         qdrant_filter = self._dict_to_filter(filter) if filter else None
         all_points = []
@@ -234,7 +242,7 @@ class QdrantVecDB(BaseVecDB):
                 limit=scroll_limit,
                 scroll_filter=qdrant_filter,
                 offset=offset,
-                with_vectors=True,
+                with_vectors=with_vectors,
                 with_payload=True,
             )
 
@@ -251,15 +259,15 @@ class QdrantVecDB(BaseVecDB):
         return [
             VecDBItem(
                 id=point.id,
-                vector=point.vector,
+                vector=point.vector if with_vectors else None,
                 payload=point.payload,
             )
             for point in all_points
         ]
 
-    def get_all(self, scroll_limit=100) -> list[VecDBItem]:
+    def get_all(self, scroll_limit=100, with_vectors: bool = True) -> list[VecDBItem]:
         """Retrieve all items in the vector database."""
-        return self.get_by_filter({}, scroll_limit=scroll_limit)
+        return self.get_by_filter({}, scroll_limit=scroll_limit, with_vectors=with_vectors)
 
     def count(self, filter: dict[str, Any] | None = None) -> int:
         """Count items in the database, optionally with filter."""

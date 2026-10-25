@@ -78,12 +78,43 @@ def test_handle_add_does_not_reuse_a_node_merged_away_in_the_same_batch():
         [[first, second, "redundant"]],  # "a" absorbs "b"
         [],
     ]
+    reorganizer.resolver.resolve.return_value = "b"
 
     reorganizer.handle_add(
         QueueMessage(op="add", after_node=[first, second, third], user_name="tenant-b")
     )
 
     assert _deduped_ids(reorganizer) == ["a", "c"]
+
+
+def test_handle_add_stops_judging_a_node_that_was_itself_archived():
+    """A back-filled old conversation is written later but said earlier, so resolve
+    archives the new node. Its remaining candidates must not be resolved against it."""
+    reorganizer = _make_reorganizer()
+    new, old_1, old_2 = _node("new"), _node("old1"), _node("old2")
+    reorganizer.resolver.detect.return_value = [
+        [new, old_1, "supersedes"],
+        [new, old_2, "supersedes"],
+    ]
+    reorganizer.resolver.resolve.return_value = "new"
+
+    reorganizer.handle_add(QueueMessage(op="add", after_node=[new], user_name="tenant-b"))
+
+    assert reorganizer.resolver.resolve.call_count == 1
+
+
+def test_handle_add_keeps_resolving_when_a_pair_was_a_noop():
+    reorganizer = _make_reorganizer()
+    new, old_1, old_2 = _node("new"), _node("old1"), _node("old2")
+    reorganizer.resolver.detect.return_value = [
+        [new, old_1, "supersedes"],
+        [new, old_2, "supersedes"],
+    ]
+    reorganizer.resolver.resolve.side_effect = [None, "old2"]
+
+    reorganizer.handle_add(QueueMessage(op="add", after_node=[new], user_name="tenant-b"))
+
+    assert reorganizer.resolver.resolve.call_count == 2
 
 
 def test_handle_add_ignores_missing_entries():

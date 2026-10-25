@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from memos.utils import utc_now
+
 
 class MotiveType(str, Enum):
     """Dream motive taxonomy.
@@ -76,7 +78,7 @@ class DreamMemoryLifecycle(BaseModel):
 
     memory_id: str
     source_dream_id: str = ""
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
     last_hit_at: datetime | None = None
     hit_count: int = 0
     usefulness_score: float = 0.0
@@ -134,7 +136,7 @@ class DreamDiaryEntry(BaseModel):
     motive: dict | None = None
     context_events: list[dict[str, Any]] = Field(default_factory=list)
     themes: list[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
     status: str = "completed"
 
     def format_content(self) -> str:

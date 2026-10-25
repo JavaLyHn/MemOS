@@ -4,7 +4,6 @@ import json
 import re
 import uuid
 
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from tenacity import retry, stop_after_attempt, wait_random_exponential
@@ -28,6 +27,7 @@ from memos.mem_feedback.utils import (
 from memos.mem_reader.factory import MemReaderFactory
 from memos.mem_reader.read_multi_modal import detect_lang
 from memos.memories.textual.item import TextualMemoryItem
+from memos.memories.textual.tree_text_memory.organize import versioning
 from memos.memories.textual.tree_text_memory.organize.manager import (
     MemoryManager,
     extract_working_binding_ids,
@@ -52,6 +52,7 @@ from memos.templates.mem_feedback_prompts import (
     UPDATE_FORMER_MEMORIES_ZH,
 )
 from memos.types import MessageDict
+from memos.utils import utc_now_iso
 
 
 FEEDBACK_PROMPT_DICT = {
@@ -243,9 +244,7 @@ class MemFeedback(BaseMemFeedback):
         if to_add_memory.metadata.memory_type == "PreferenceMemory":
             to_add_memory.metadata.preference = new_memory_item.memory
 
-        to_add_memory.metadata.created_at = to_add_memory.metadata.updated_at = (
-            datetime.now().isoformat()
-        )
+        to_add_memory.metadata.created_at = to_add_memory.metadata.updated_at = utc_now_iso()
         to_add_memory.metadata.background = new_memory_item.metadata.background
         to_add_memory.metadata.sources = new_memory_item.metadata.sources
 
@@ -291,42 +290,29 @@ class MemFeedback(BaseMemFeedback):
             new_memory_item.memory = operation["text"]
             new_memory_item.metadata.embedding = self._batch_embed([operation["text"]])[0]
 
-        if getattr(self.mem_reader, "memory_version_switch", "off") != "on":
-            if memory_type == "WorkingMemory":
-                fields = {
-                    "memory": new_memory_item.memory,
-                    "key": new_memory_item.metadata.key,
-                    "tags": new_memory_item.metadata.tags,
-                    "embedding": new_memory_item.metadata.embedding,
-                    "background": new_memory_item.metadata.background,
-                    "covered_history": old_memory_item.id,
-                }
-                self.graph_store.update_node(old_memory_item.id, fields=fields, user_name=user_name)
-                item_id = old_memory_item.id
-            else:
-                done = self._single_add_operation(
-                    old_memory_item, new_memory_item, user_id, user_name, async_mode
-                )
-                item_id = done.get("id")
-                self.graph_store.update_node(
-                    item_id, {"covered_history": old_memory_item.id}, user_name=user_name
-                )
-                self.graph_store.update_node(
-                    old_memory_item.id, {"status": "archived"}, user_name=user_name
-                )
-
-            logger.info(
-                f"[Memory Feedback UPDATE] New Add:{item_id} | Set archived:{old_memory_item.id} | memory_type: {memory_type}"
-            )
+        if memory_type == "WorkingMemory" and (
+            getattr(self.mem_reader, "memory_version_switch", "off") != "on"
+        ):
+            fields = {
+                "memory": new_memory_item.memory,
+                "key": new_memory_item.metadata.key,
+                "tags": new_memory_item.metadata.tags,
+                "embedding": new_memory_item.metadata.embedding,
+                "background": new_memory_item.metadata.background,
+                "covered_history": old_memory_item.id,
+            }
+            self.graph_store.update_node(old_memory_item.id, fields=fields, user_name=user_name)
+            item_id = old_memory_item.id
+            self._del_working_binding(user_name, [old_memory_item])
         else:
             item_id = self._single_update_operation_with_versions(
                 old_memory_item=old_memory_item,
                 new_memory_item=new_memory_item,
                 user_name=user_name,
             )
-            logger.info(
-                f"[Memory Feedback UPDATE] Updated:{item_id} | history appended | memory_type: {old_memory_item.metadata.memory_type}"
-            )
+        logger.info(
+            f"[Memory Feedback UPDATE] Updated:{item_id} in place | history appended | memory_type: {memory_type}"
+        )
 
         return {
             "id": item_id,
@@ -342,6 +328,7 @@ class MemFeedback(BaseMemFeedback):
         new_memory_item: TextualMemoryItem,
         user_name: str,
     ) -> str:
+        """Update ``old_memory_item`` in place; its previous text goes to ``history``."""
         try:
             updated_item, archived_item, archived_metadata, updated_fields = trigger_single_hook(
                 H.MEMORY_VERSION_APPLY_FEEDBACK_UPDATE,
@@ -349,40 +336,10 @@ class MemFeedback(BaseMemFeedback):
                 new_item=new_memory_item,
                 user_name=user_name,
             )
-        except Exception as e:
-            logger.warning(
-                "[Memory Feedback UPDATE] history fallback for %s: %s", old_memory_item.id, e
+        except RuntimeError:
+            updated_item, archived_item, archived_metadata, updated_fields = (
+                versioning.apply_feedback_update(old_memory_item, new_memory_item, user_name)
             )
-            updated_item = old_memory_item.model_copy(deep=True)
-            updated_item.memory = new_memory_item.memory
-            updated_item.metadata.key = new_memory_item.metadata.key
-            updated_item.metadata.tags = new_memory_item.metadata.tags
-            updated_item.metadata.background = new_memory_item.metadata.background
-            if getattr(new_memory_item.metadata, "sources", None) is not None:
-                current_sources = list(updated_item.metadata.sources or [])
-                updated_item.metadata.sources = (
-                    list(new_memory_item.metadata.sources or []) + current_sources
-                )
-            if getattr(new_memory_item.metadata, "embedding", None) is not None:
-                updated_item.metadata.embedding = new_memory_item.metadata.embedding
-            if updated_item.metadata.memory_type == "PreferenceMemory":
-                updated_item.metadata.preference = updated_item.memory
-            updated_fields = {
-                "memory": updated_item.memory,
-                "key": updated_item.metadata.key,
-                "tags": updated_item.metadata.tags,
-                "embedding": updated_item.metadata.embedding,
-                "background": updated_item.metadata.background,
-                "sources": [
-                    source.model_dump(exclude_none=True)
-                    if hasattr(source, "model_dump")
-                    else source
-                    for source in (updated_item.metadata.sources or [])
-                ],
-                "covered_history": old_memory_item.id,
-            }
-            archived_item = None
-            archived_metadata = None
 
         if archived_item and archived_metadata:
             try:
@@ -398,13 +355,33 @@ class MemFeedback(BaseMemFeedback):
                     old_memory_item.id,
                     e,
                 )
+
+        # A separate vector store keeps the vector (the graph node must not carry it);
+        # backends that index vectors inside the graph take it as a node property.
+        fields = dict(updated_fields)
+        embedding = fields.pop("embedding", None)
+        sync_vector = getattr(self.graph_store, "_sync_vector_payload", None)
+        separate_vector = getattr(self.graph_store, "vec_db", None) is not None and callable(
+            sync_vector
+        )
+        if embedding is not None and not separate_vector:
+            fields["embedding"] = embedding
         self._retry_db_operation(
             lambda: self.graph_store.update_node(
                 id=updated_item.id,
-                fields=updated_fields,
+                fields=fields,
                 user_name=user_name,
             )
         )
+        if embedding is not None and separate_vector:
+            payload = {"embedding": embedding, "memory": updated_item.memory}
+            try:
+                sync_vector(updated_item.id, payload)
+            except Exception as e:  # noqa: BLE001 - one retry, then surface the failure
+                logger.warning(
+                    "[Memory Feedback UPDATE] vector sync retry for %s: %s", updated_item.id, e
+                )
+                sync_vector(updated_item.id, payload)
         self._del_working_binding(user_name, [old_memory_item])
         return updated_item.id
 
@@ -475,7 +452,7 @@ class MemFeedback(BaseMemFeedback):
             memory_chunks = split_into_chunks(current_memories, max_tokens_per_chunk=500)
 
             all_operations = []
-            now_time = datetime.now().isoformat()
+            now_time = utc_now_iso()
             with ContextThreadPoolExecutor(max_workers=10) as executor:
                 future_to_chunk_idx = {}
                 for chunk in memory_chunks:
@@ -560,23 +537,6 @@ class MemFeedback(BaseMemFeedback):
                         f"[0107 Feedback Core: semantics_feedback] Operation failed for {original_op}: {e}",
                         exc_info=True,
                     )
-        if update_results and getattr(self.mem_reader, "memory_version_switch", "off") != "on":
-            archived_ids = [item["archived_id"] for item in update_results]
-            archived_items = []
-            for aid in archived_ids:
-                try:
-                    node = self.graph_store.get_node(aid, user_name=user_name)
-                    if node:
-                        archived_items.append(TextualMemoryItem(**node))
-                except Exception as e:
-                    logger.warning(
-                        "[Memory Feedback] Failed to fetch archived item %s for working_binding cleanup: %s",
-                        aid,
-                        e,
-                    )
-            if archived_items:
-                self._del_working_binding(user_name, archived_items)
-
         return {"record": {"add": add_results, "update": update_results}}
 
     def _feedback_memory(
@@ -591,21 +551,32 @@ class MemFeedback(BaseMemFeedback):
         history_str = "\n".join(chat_history_lis) + f"\nuser feedback: \n{feedback_content}"
 
         retrieved_memories = [
-            self.graph_store.get_node(_id, user_name=user_name) for _id in retrieved_memory_ids
+            node
+            for node in (
+                self.graph_store.get_node(_id, user_name=user_name) for _id in retrieved_memory_ids
+            )
+            if node
         ]
-        filterd_ids = [
-            item["id"] for item in retrieved_memories if "mode:fast" in item["metadata"]["tags"]
-        ]
+
+        def is_fast(node: dict) -> bool:
+            return "mode:fast" in ((node.get("metadata") or {}).get("tags") or [])
+
+        filterd_ids = [node["id"] for node in retrieved_memories if is_fast(node)]
         if filterd_ids:
             logger.warning(
                 f"[0107 Feedback Core: _feedback_memory] Since the tags mode is fast, no modifications are made to the following memory {filterd_ids}."
             )
 
-        current_memories = [
-            TextualMemoryItem(**item)
-            for item in retrieved_memories
-            if "mode:fast" not in item["metadata"]["tags"]
-        ]
+        current_memories = []
+        for node in retrieved_memories:
+            if is_fast(node):
+                continue
+            try:
+                current_memories.append(TextualMemoryItem(**node))
+            except ValueError as e:
+                logger.warning(
+                    f"[0107 Feedback Core: _feedback_memory] Skip unreadable memory {node.get('id')}: {e}"
+                )
 
         with ContextThreadPoolExecutor(max_workers=3) as ex:
             futures = {
@@ -614,7 +585,7 @@ class MemFeedback(BaseMemFeedback):
                     user_id,
                     user_name,
                     mem,
-                    current_memories,
+                    list(current_memories),
                     history_str,
                     chat_history,
                     info,
@@ -657,11 +628,6 @@ class MemFeedback(BaseMemFeedback):
     def _retrieve(self, query: str, info=None, top_k=20, user_name=None):
         """Retrieve memory items"""
 
-        def check_has_edges(mem_item: TextualMemoryItem) -> tuple[TextualMemoryItem, bool]:
-            """Check if a memory item has edges."""
-            edges = self.searcher.graph_store.get_edges(mem_item.id, user_name=user_name)
-            return (mem_item, len(edges) == 0)
-
         logger.info(f"[feedback _retrieve] query: {query}, user_name: {user_name}")
         text_mems = self.searcher.search(
             query=query,
@@ -686,26 +652,7 @@ class MemFeedback(BaseMemFeedback):
             pref_mems = [item[0] for item in pref_mems if float(item[1]) > 0.01]
             text_mems.extend(pref_mems)
 
-        # Memory with edges is not modified by feedback
-        retrieved_mems = []
-        with ContextThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(check_has_edges, item): item for item in text_mems}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    mem_item, has_no_edges = future.result()
-                    if has_no_edges:
-                        retrieved_mems.append(mem_item)
-                except Exception as e:
-                    logger.error(f"[0107 Feedback Core: _retrieve] Error checking edges: {e}")
-
-        if len(retrieved_mems) < len(text_mems):
-            logger.info(
-                f"[0107 Feedback Core: _retrieve] {len(text_mems) - len(retrieved_mems)} "
-                f"text memories are not modified by feedback due to edges."
-            )
-
-        return retrieved_mems
-
+        return text_mems
 
     def _get_llm_response(
         self,
@@ -1065,7 +1012,7 @@ class MemFeedback(BaseMemFeedback):
         if feedback_content.strip() == "":
             return {"record": {"add": [], "update": []}}
         try:
-            feedback_time = kwargs.get("feedback_time") or datetime.now().isoformat()
+            feedback_time = kwargs.get("feedback_time") or utc_now_iso()
             session_id = kwargs.get("session_id")
             if not info:
                 info = {"user_id": user_id, "user_name": user_name, "session_id": session_id}

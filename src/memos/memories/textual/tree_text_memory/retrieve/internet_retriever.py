@@ -2,8 +2,6 @@
 
 import uuid
 
-from datetime import datetime
-
 import requests
 
 from memos.embedders.factory import OllamaEmbedder
@@ -12,6 +10,7 @@ from memos.memories.textual.item import (
     TextualMemoryItem,
     TreeNodeTextualMemoryMetadata,
 )
+from memos.utils import utc_now, utc_now_iso
 
 
 class GoogleCustomSearchAPI:
@@ -168,7 +167,7 @@ class InternetGoogleRetriever:
                 session_id=info.get("session_id", ""),
                 status="activated",
                 type="fact",  # Internet search results are usually factual information
-                memory_time=datetime.now().strftime("%Y-%m-%d"),
+                memory_time=utc_now().strftime("%Y-%m-%d"),
                 source="web",
                 confidence=85.0,  # Confidence level for internet information
                 entities=self._extract_entities(title, snippet),
@@ -178,7 +177,7 @@ class InternetGoogleRetriever:
                 key=title,
                 sources=[SourceMessage(type="web", url=link)] if link else [],
                 embedding=self.embedder.embed([memory_content])[0],  # Can add embedding later
-                created_at=datetime.now().isoformat(),
+                created_at=utc_now_iso(),
                 usage=[],
                 background=f"Internet search result from {display_link}",
             )

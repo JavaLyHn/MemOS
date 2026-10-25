@@ -6,11 +6,14 @@ using dependency injection for better modularity and testability.
 """
 
 import copy
+import json
 import math
 import os
 
 from contextlib import suppress
 from typing import Any
+
+from fastapi import HTTPException
 
 from memos.api.handlers.base_handler import BaseHandler, HandlerDependencies
 from memos.api.handlers.formatters_handler import rerank_knowledge_mem
@@ -24,7 +27,15 @@ from memos.multi_mem_cube.composite_cube import CompositeCubeView
 from memos.multi_mem_cube.single_cube import SingleCubeView
 from memos.multi_mem_cube.views import MemCubeView
 from memos.plugins.hook_defs import H
-from memos.plugins.hooks import hookable, trigger_hook
+from memos.plugins.hooks import has_hook, hookable, trigger_hook
+from memos.search.context_format import (
+    VALID_MODES,
+    apply_context_format,
+    normalize_mode,
+)
+from memos.search.time_intent import time_aware_enabled
+from memos.search.time_understanding import TimeIntent, understand_query
+from memos.search.version_select import apply_time_intent, widened_top_k
 
 
 logger = get_logger(__name__)
@@ -44,6 +55,48 @@ def _env_int(name: str, default: int) -> int:
     with suppress(TypeError, ValueError):
         return int(os.getenv(name, str(default)))
     return default
+
+
+def _env_float(name: str, default: float) -> float:
+    with suppress(TypeError, ValueError):
+        return float(os.getenv(name, str(default)))
+    return default
+
+
+def _history_versions(raw: Any) -> list[dict[str, Any]]:
+    """Normalize a node's ``history`` into ``[{version, memory, ...}]``, newest first."""
+    if isinstance(raw, str):
+        with suppress(ValueError):
+            raw = json.loads(raw)
+    if not isinstance(raw, list):
+        return []
+    versions: list[dict[str, Any]] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            with suppress(ValueError):
+                entry = json.loads(entry)
+        if not isinstance(entry, dict):
+            continue
+        text = entry.get("memory")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        version = {
+            "version": entry.get("version"),
+            "memory": text,
+            "update_type": entry.get("update_type"),
+            "created_at": entry.get("created_at"),
+        }
+        if entry.get("timespec"):
+            version["timespec"] = entry["timespec"]
+        versions.append(version)
+    versions.sort(
+        key=lambda v: (
+            v["version"] if isinstance(v["version"], int) else -1,
+            str(v["created_at"] or ""),
+        ),
+        reverse=True,
+    )
+    return versions
 
 
 class SearchHandler(BaseHandler):
@@ -84,8 +137,19 @@ class SearchHandler(BaseHandler):
             summarize_search_request(search_req),
         )
 
+        context_mode = self._context_mode(search_req)
+
         # Use deepcopy to avoid modifying the original request object
         search_req_local = copy.deepcopy(search_req)
+        intent = self._apply_time_intent(search_req_local)
+
+        # A time window is applied to the hits (version selection and rerank), not to
+        # the candidate query, so retrieval needs more candidates to still fill top_k.
+        windowed = intent is not None and intent.kind in ("as_of", "recent")
+        finish_req = search_req
+        if windowed:
+            finish_req = search_req.model_copy(update={"top_k": widened_top_k(search_req.top_k)})
+        search_req_local.top_k = finish_req.top_k
 
         # Expand top_k for deduplication (5x to ensure enough candidates)
         if search_req_local.dedup in ("sim", "mmr"):
@@ -93,7 +157,35 @@ class SearchHandler(BaseHandler):
 
         # Search and deduplicate
         cube_view = self._build_cube_view(search_req_local)
-        results = cube_view.search_memories(search_req_local)
+        results = self._finish_search(
+            finish_req, search_req_local, cube_view.search_memories(search_req_local)
+        )
+        if intent is not None:
+            results = apply_time_intent(
+                results,
+                intent,
+                top_k=search_req.top_k,
+                rerank=not search_req.sort_by,
+            )
+        results = apply_context_format(results, search_req.query, context_mode)
+
+        self.logger.info(
+            "[SearchHandler] Final search result summary: %s",
+            summarize_search_results(results),
+        )
+
+        return SearchResponse(
+            message="Search completed successfully",
+            data=results,
+        )
+
+    def _finish_search(
+        self,
+        search_req: APISearchRequest,
+        search_req_local: APISearchRequest,
+        results: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Hooks, thresholds, dedup, rerank, view filters and sorting for one search."""
         hooked_results = trigger_hook(
             H.SEARCH_MEMORY_RESULTS,
             handler=self,
@@ -141,19 +233,235 @@ class SearchHandler(BaseHandler):
         if hooked_results is not None:
             results = hooked_results
 
+        # Cloud-compatible recall whitelist + profile recall.
+        results = self._filter_by_include_memory_view(results, search_req_local.include_memory_view)
+        results = self._append_profile_memories(results, search_req_local)
+
+        if getattr(search_req_local, "_budget_across_views", False):
+            # `search_req.top_k` here is the caller's value, never the 3x dedup
+            # widening on `search_req_local`. With a time window it is the widened
+            # top_k, and `apply_time_intent` only trims text_mem back.
+            results = self._apply_view_budget(results, search_req.top_k)
+
         # 放在最后一道：钩子也可能往 results 里塞东西，出栈前统一只留 activated。
         results = self._drop_inactive(results)
+        results = self._sort_memories(
+            results,
+            sort_by=search_req_local.sort_by,
+            sort_order=search_req_local.sort_order,
+        )
+        if search_req_local.include_history:
+            results = self._attach_history_versions(results)
+        return results
 
+    @staticmethod
+    def _context_mode(search_req: APISearchRequest) -> str:
+        """The built-in context format; a value no built-in knows belongs to a render plugin."""
+        mode = normalize_mode(search_req.context_format)
+        if mode is not None:
+            return mode
+        if has_hook(H.SEARCH_CONTEXT_RENDER):
+            return "memory"
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"unsupported context_format {search_req.context_format!r}; "
+                f"expected one of: {', '.join(VALID_MODES)}"
+            ),
+        )
+
+    def _apply_time_intent(self, search_req: APISearchRequest) -> TimeIntent | None:
+        """What the query says about time; ``None`` when time awareness is off.
+
+        Opt-in (``time_aware`` or ``SEARCH_TIME_AWARE``). The candidate query itself
+        is never narrowed: the intent is applied to the hits afterwards (see
+        ``version_select``). A query that only asks about the past ("我以前住哪")
+        gets the earlier versions of each hit attached.
+        """
+        if not time_aware_enabled(search_req.time_aware):
+            return None
+        intent = understand_query(search_req.query, getattr(self.deps, "llm", None))
+        if intent.kind == "past":
+            search_req.include_history = True
         self.logger.info(
-            "[SearchHandler] Final search result summary: %s",
-            summarize_search_results(results),
+            "[SearchHandler] Time intent: %s (%s) %s", intent.kind, intent.source, intent.label
+        )
+        return intent
+
+    @staticmethod
+    def _attach_history_versions(results: dict[str, Any]) -> dict[str, Any]:
+        """Expose earlier versions of each hit as ``metadata.history_versions``.
+
+        The versions already live on the node (`history`, written by
+        ``update_memory``, feedback and the version pipeline); this only gives
+        them a stable shape. Archived nodes are not searched, so the result set
+        and ``top_k`` stay exactly as they were.
+        """
+        limit = max(1, _env_int("SEARCH_HISTORY_MAX_VERSIONS", 10))
+        for bucket in ("text_mem", "event_mem", "skill_mem", "tool_mem"):
+            for group in (results or {}).get(bucket) or []:
+                memories = group.get("memories") if isinstance(group, dict) else None
+                for memory in memories or []:
+                    metadata = memory.get("metadata") if isinstance(memory, dict) else None
+                    if not isinstance(metadata, dict):
+                        continue
+                    versions = _history_versions(metadata.get("history"))
+                    if versions:
+                        metadata["history_versions"] = versions[:limit]
+        return results
+
+    @staticmethod
+    def _is_profile_item(item: dict[str, Any]) -> bool:
+        """Keep in sync with ``cloud_contract.split_views`` (same profile detection)."""
+        metadata = item.get("metadata")
+        return bool(item.get("template_id")) or (
+            isinstance(metadata, dict) and metadata.get("memory_type") == "ProfileMemory"
         )
 
-        return SearchResponse(
-            message="Search completed successfully",
-            data=results,
-        )
+    @staticmethod
+    def _relativity(item: dict[str, Any]) -> float:
+        """Relativity from the item or its metadata; 0.0 when absent or not a finite number."""
+        for source in (item, item.get("metadata")):
+            value = source.get("relativity") if isinstance(source, dict) else None
+            if value is None:
+                continue
+            try:
+                score = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+            return score if math.isfinite(score) else 0.0
+        return 0.0
 
+    @staticmethod
+    def _apply_view_budget(results: dict[str, Any], budget: int) -> dict[str, Any]:
+        """Keep the best ``budget`` hits across every view (cloud `memory_limit_number`).
+
+        The cloud returns one global budget split into per-view lists, e.g.
+        ``memory_limit_number=3`` gives 1 factual + 2 preference. Retrieval already
+        over-fetches per view, so this only trims.
+        """
+        buckets = ("text_mem", "pref_mem", "event_mem", "skill_mem", "tool_mem", "profile_mem")
+        candidates: list[tuple[float, str, int, int]] = []
+        profile_keys: set[tuple[str, int, int]] = set()
+        for bucket in buckets:
+            for group_index, group in enumerate(results.get(bucket) or []):
+                if not isinstance(group, dict):
+                    continue
+                for item_index, item in enumerate(group.get("memories") or []):
+                    key = (bucket, group_index, item_index)
+                    if SearchHandler._is_profile_item(item):
+                        # Profile fields have no relevance score (ProfileService.recall
+                        # leaves `relativity` None), so ranking them against scored hits
+                        # would always drop them. The budget trims recall views only.
+                        profile_keys.add(key)
+                        continue
+                    candidates.append((SearchHandler._relativity(item), *key))
+        if len(candidates) <= budget:
+            return results
+        keep = profile_keys | {tuple(key) for _, *key in sorted(candidates, reverse=True)[:budget]}
+        for bucket in buckets:
+            groups = []
+            for group_index, group in enumerate(results.get(bucket) or []):
+                if not isinstance(group, dict):
+                    continue
+                memories = [
+                    item
+                    for item_index, item in enumerate(group.get("memories") or [])
+                    if (bucket, group_index, item_index) in keep
+                ]
+                if memories:
+                    groups.append({**group, "memories": memories})
+            if results.get(bucket):
+                results[bucket] = groups
+        return results
+
+    @staticmethod
+    def _filter_by_include_memory_view(
+        results: dict[str, Any], views: list[str] | None
+    ) -> dict[str, Any]:
+        """Keep only the buckets named in ``include_memory_view``.
+
+        Legacy switches (`include_preference` etc.) were already mapped onto
+        the request by the model validator; this is the bucket-level gate.
+        """
+        if views is None or not results:
+            return results
+
+        bucket_to_view = {
+            "text_mem": "detail_factual",
+            "pref_mem": "preference",
+            "event_mem": "event",
+            "skill_mem": "skill",
+            "tool_mem": "tool_memory",
+            "profile_mem": "profile",
+        }
+        for bucket, group in list(results.items()):
+            if bucket in ("pref_note", "pref_string"):
+                if "preference" not in views:
+                    results[bucket] = "" if isinstance(group, str) else []
+                continue
+            if bucket == "dream_mem":
+                # Dream synthesis is not one of the cloud views.
+                results[bucket] = []
+                continue
+            view = bucket_to_view.get(bucket)
+            if view is not None and view not in views and isinstance(group, list):
+                results[bucket] = []
+
+        if "preference" not in views and isinstance(results.get("pref_note"), str):
+            results["pref_note"] = ""
+        return results
+
+    def _append_profile_memories(
+        self, results: dict[str, Any], search_req: APISearchRequest
+    ) -> dict[str, Any]:
+        """Merge bound profile instances into the response (cloud `profile` view)."""
+        views = search_req.include_memory_view
+        if not views or "profile" not in views or results is None:
+            return results
+
+        from memos.api.cloud_store import build_metadata_store
+        from memos.api.profile import ProfileService, profile_reserved_top_k
+        from memos.memories.textual.owner import normalize_id_list
+
+        graph_db = self.graph_db or getattr(self.searcher, "graph_store", None)
+        try:
+            service = ProfileService(build_metadata_store(graph_db))
+        except Exception:
+            self.logger.warning("Profile recall unavailable", exc_info=True)
+            return results
+
+        top_k = profile_reserved_top_k()
+        if top_k <= 0:
+            return results
+
+        agent_ids = normalize_id_list(getattr(search_req, "agent_id", None))
+        subjects: list[dict[str, str]] = []
+        if search_req.user_id:
+            subjects.append({"user_id": search_req.user_id})
+        subjects.extend({"agent_id": aid} for aid in agent_ids)
+        profile_groups: list[dict[str, Any]] = []
+        for cube_id in self._resolve_cube_ids(search_req):
+            memories: list[dict[str, Any]] = []
+            for subject in subjects:
+                memories.extend(
+                    service.recall(
+                        user_name=cube_id,
+                        top_k=top_k,
+                        **subject,
+                    )
+                )
+            if memories:
+                profile_groups.append(
+                    {
+                        "cube_id": cube_id,
+                        "memories": memories,
+                        "total_nodes": len(memories),
+                    }
+                )
+        if profile_groups:
+            results.setdefault("profile_mem", []).extend(profile_groups)
+        return results
 
     def _recall_context_buckets(
         self, *, search_req: APISearchRequest, top_k: int
@@ -246,22 +554,37 @@ class SearchHandler(BaseHandler):
 
     @staticmethod
     def _drop_inactive(results: dict[str, Any]) -> dict[str, Any]:
-        """出栈前只留 activated 的记忆。
+        """出栈前只留 activated 的记忆（two-stage 开启时放行 resolving）。
 
         候选集那一层已经各自限定过 status（graph recall 走 `get_by_metadata(status=…)`、
         向量走 Qdrant 的 payload 过滤），这里是兜底：只有 activated 对调用方有意义，
         归档的是被合并掉的旧版本、软删的是用户已经删掉的，返回它们只会挤占 top_k
         并让调用方拿到重复或已失效的内容。
 
+        两段式加工（`TWO_STAGE_ADD=true`）下，粗加工节点是 `resolving`，需要在精加工
+        完成前可见；它们的 relativity 会乘一个较低权重（`TWO_STAGE_COARSE_WEIGHT`，
+        默认 0.8），避免粗结果压过精结果。
+
         拿不到 status 的按不可返回处理（fail-closed）——无法证明它是 activated。
         这类会打成 WARNING，否则某个上游漏传 status 时会变成静默的召回下跌。
+
+        例外：dream_mem（日度跨案例综合 + 洞察）不走这条判定。它的终态就是 completed，
+        context_only / skipped 同样是终态，不是"被归档"或"被删除"。这里按 activated 过滤
+        会把整个桶清空，所以整桶放行；这两个类型的生命周期由 Dream 侧自己管。
         """
         if not results:
             return results
 
+        from memos.memories.textual.two_stage import two_stage_enabled
+
+        allow_resolving = two_stage_enabled()
+        coarse_weight = _env_float("TWO_STAGE_COARSE_WEIGHT", 0.8)
+
         dropped: dict[str, int] = {}
         unknown: list[str] = []
-        for groups in results.values():
+        for key, groups in results.items():
+            if key == "dream_mem":
+                continue
             if not isinstance(groups, list):
                 continue
             for group in groups:
@@ -275,6 +598,12 @@ class SearchHandler(BaseHandler):
                     meta = mem.get("metadata") if isinstance(mem, dict) else None
                     status = meta.get("status") if isinstance(meta, dict) else None
                     if status == "activated":
+                        kept.append(mem)
+                        continue
+                    if status == "resolving" and allow_resolving:
+                        relativity = meta.get("relativity")
+                        if isinstance(relativity, int | float):
+                            meta["relativity"] = relativity * coarse_weight
                         kept.append(mem)
                         continue
                     if status is None:
@@ -296,11 +625,51 @@ class SearchHandler(BaseHandler):
         return results
 
     @staticmethod
+    def _sort_memories(
+        results: dict[str, Any],
+        sort_by: str | None,
+        sort_order: str = "desc",
+    ) -> dict[str, Any]:
+        """Sort each bucket's memories by a metadata field (missing values last)."""
+        if not sort_by or not results:
+            return results
+
+        from memos.utils import parse_datetime
+
+        def sort_key(memory: dict[str, Any]) -> tuple[bool, float]:
+            metadata = memory.get("metadata") if isinstance(memory, dict) else None
+            value = metadata.get(sort_by) if isinstance(metadata, dict) else None
+            if value is None or value == "":
+                return True, 0.0
+            if sort_by == "relativity":
+                try:
+                    return False, float(value)
+                except (TypeError, ValueError):
+                    return True, 0.0
+            parsed = parse_datetime(value)
+            if parsed is None:
+                return True, 0.0
+            return False, parsed.timestamp()
+
+        for groups in results.values():
+            if not isinstance(groups, list):
+                continue
+            for group in groups:
+                memories = group.get("memories") if isinstance(group, dict) else None
+                if not isinstance(memories, list):
+                    continue
+                present = [mem for mem in memories if not sort_key(mem)[0]]
+                missing = [mem for mem in memories if sort_key(mem)[0]]
+                present.sort(key=sort_key, reverse=(sort_order == "desc"))
+                group["memories"] = present + missing
+        return results
+
+    @staticmethod
     def _apply_relativity_threshold(results: dict[str, Any], relativity: float) -> dict[str, Any]:
         if relativity <= 0:
             return results
 
-        for key in ("text_mem", "pref_mem"):
+        for key in ("text_mem", "pref_mem", "event_mem"):
             buckets = results.get(key)
             if not isinstance(buckets, list):
                 continue
@@ -698,7 +1067,6 @@ class SearchHandler(BaseHandler):
         similarity_threshold: float,
     ) -> bool:
         return all(similarity_matrix[index][j] <= similarity_threshold for j in selected_indices)
-
 
     def _extract_embeddings(self, memories: list[dict[str, Any]]) -> list[list[float]]:
         embeddings: list[list[float]] = []

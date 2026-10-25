@@ -29,6 +29,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 # Import Krolik extensions
+from memos.api.contract import CONTRACT_VERSION
 from memos.api.lifecycle import shutdown_components
 from memos.api.middleware.rate_limit import RateLimitMiddleware
 
@@ -126,6 +127,7 @@ async def health_check():
         "version": "2.0.3-krolik",
         "auth_enabled": os.getenv("AUTH_ENABLED", "false").lower() == "true",
         "rate_limit_enabled": RATE_LIMIT_ENABLED,
+        "contract_version": CONTRACT_VERSION,
     }
 
 

@@ -14,23 +14,25 @@ import re
 import time
 
 from contextlib import suppress
-from datetime import datetime
 from typing import Any, Literal
 
 from memos.configs.graph_db import PostgresGraphDBConfig
 from memos.dependency import require_python_package
 from memos.graph_dbs.base import BaseGraphDB
 from memos.log import get_logger
+from memos.time_basis import TIME_BASIS_UTC, convert_legacy_node, stamp_utc_basis
+from memos.utils import utc_now_iso
 
 
 logger = get_logger(__name__)
 
 
 def _prepare_node_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    """Ensure metadata has proper datetime fields and normalized types."""
-    now = datetime.utcnow().isoformat()
+    """Ensure metadata has proper datetime fields, normalized types and a UTC basis."""
+    now = utc_now_iso()
     metadata.setdefault("created_at", now)
     metadata.setdefault("updated_at", now)
+    stamp_utc_basis(metadata)
 
     # Normalize embedding type
     embedding = metadata.get("embedding")
@@ -251,8 +253,8 @@ class PostgresGraphDB(BaseGraphDB):
 
         # Extract embedding
         embedding = metadata.pop("embedding", None)
-        created_at = metadata.pop("created_at", datetime.utcnow().isoformat())
-        updated_at = metadata.pop("updated_at", datetime.utcnow().isoformat())
+        created_at = metadata.pop("created_at", utc_now_iso())
+        updated_at = metadata.pop("updated_at", utc_now_iso())
 
         # Serialize sources if present
         if metadata.get("sources"):
@@ -301,8 +303,11 @@ class PostgresGraphDB(BaseGraphDB):
         finally:
             self._put_conn(conn)
 
-    def add_nodes_batch(self, nodes: list[dict[str, Any]], user_name: str | None = None) -> None:
-        """Batch add memory nodes."""
+    def add_nodes_batch(
+        self, nodes: list[dict[str, Any]], user_name: str | None = None
+    ) -> list[str]:
+        """Batch add memory nodes and return the ids that were written."""
+        written_ids: list[str] = []
         for node in nodes:
             self.add_node(
                 id=node["id"],
@@ -310,6 +315,8 @@ class PostgresGraphDB(BaseGraphDB):
                 metadata=node.get("metadata", {}),
                 user_name=user_name,
             )
+            written_ids.append(node["id"])
+        return written_ids
 
     def update_node(self, id: str, fields: dict[str, Any], user_name: str | None = None) -> None:
         """Update node fields."""
@@ -324,10 +331,14 @@ class PostgresGraphDB(BaseGraphDB):
 
         # Merge properties
         props = current.get("metadata", {}).copy()
+        # One node must not end up with two time bases: convert whatever the
+        # caller is not overwriting, then mark the whole node as real UTC.
+        convert_legacy_node(props, skip=set(fields))
+        props["time_basis"] = TIME_BASIS_UTC
         embedding = fields.pop("embedding", None)
         memory = fields.pop("memory", current.get("memory", ""))
         props.update(fields)
-        props["updated_at"] = datetime.utcnow().isoformat()
+        props["updated_at"] = utc_now_iso()
 
         conn = self._get_conn()
         try:

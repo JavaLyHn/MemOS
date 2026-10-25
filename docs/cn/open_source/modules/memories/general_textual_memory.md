@@ -56,6 +56,29 @@ desc: "`GeneralTextMemory` 是MemOS中一个灵活的、基于向量的明文记
 | **适用规模**   | < 1K 条记忆                  | 10K - 100K 条记忆                |
 | **可预测性**   | ✅ 结果直观                   | ⚠️ 黑盒模型                       |
 
+### 可选：混合检索（向量 + BM25）
+
+配置 `hybrid_search` 后，向量排序会与 BM25 词法排序融合（默认 RRF，也可选加权 min-max 归一化）。
+不配置时，检索行为与纯向量检索完全一致。
+
+```python
+config = MemoryConfigFactory(
+    backend="general_text",
+    config={
+        "extractor_llm": { ... },
+        "embedder": { ... },
+        "vector_db": {"backend": "qdrant", ...},
+        "hybrid_search": {"fusion": "rrf", "candidate_top_k": 50},
+    },
+)
+```
+
+- 需要安装 `memos[hybrid-search]` 以获得 `rank-bm25`；缺失时自动退化为纯向量检索，不会报错。
+- 向量后端必须支持"只取 payload、不取向量"的全量快照（`BaseVecDB.supports_text_snapshot`，目前仅 Qdrant）。
+  其他后端会在构造时直接抛出 `ConfigurationError`，而不是悄悄索引一个空语料。
+- BM25 索引在进程内基于全集合的 payload 快照构建，重建开销随记忆条数增长。
+  `index_ttl_seconds` 控制其他进程写入带来的陈旧窗口；通过本实例的写入会立即失效索引。
+
 ## API总结 (`GeneralTextMemory`)
 
 ### 初始化

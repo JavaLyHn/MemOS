@@ -2,9 +2,11 @@ import uuid
 
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 # Import message types from core types module
+from memos.api.contract import TOP_K_MAX
 from memos.log import get_logger
 from memos.types import MessageList, MessagesType, PermissionDict, SearchMode
 
@@ -133,6 +135,90 @@ class RegisterCubeResponse(BaseResponse[RegisterCubeResponseData]):
     message: str = "Cube registered successfully"
 
 
+class ExtractPromptRequest(BaseRequest):
+    """Request for one project's extract prompt."""
+
+    mem_cube_id: str = Field(..., min_length=1, description="Cube / project id")
+
+
+class SaveExtractPromptRequest(ExtractPromptRequest):
+    """Save a complete extraction prompt for a project."""
+
+    prompt: str = Field(
+        ..., description="Complete prompt; must keep the ${conversation} placeholder"
+    )
+
+
+class GenerateExtractPromptRequest(ExtractPromptRequest):
+    """Rewrite the current prompt from a one-line instruction (not saved)."""
+
+    description: str = Field(..., min_length=1, description="What to change")
+
+
+class ExtractDebugMessage(BaseModel):
+    role: Literal["system", "user", "assistant"] = Field("user")
+    content: str = Field("")
+
+
+class DebugExtractRequest(ExtractPromptRequest):
+    """Run the current prompt once without writing anything."""
+
+    messages: list[ExtractDebugMessage] = Field(default_factory=list)
+    extraction_types: list[str] | None = None
+
+
+class ExtractPromptData(BaseModel):
+    mem_cube_id: str
+    prompt: str
+    extraction_types: list[str]
+    updated_at: str | None = None
+    source: str
+    is_default: bool
+
+
+class ExtractPromptResponse(BaseResponse[ExtractPromptData]):
+    pass
+
+
+class PromptData(BaseModel):
+    prompt: str
+
+
+class PromptResponse(BaseResponse[PromptData]):
+    pass
+
+
+class ExtractDebugResult(BaseModel):
+    type: str
+    content: str
+
+
+class ExtractDebugData(BaseModel):
+    extraction_types: list[str]
+    results: list[ExtractDebugResult]
+
+
+class ExtractDebugResponse(BaseResponse[ExtractDebugData]):
+    pass
+
+
+class ModelRecord(BaseModel):
+    role: str
+    model: str
+    spec: str = ""
+    source: str
+    group: Literal["memory", "chat"]
+
+
+class ModelListData(BaseModel):
+    records: list[ModelRecord]
+    total: int
+
+
+class ModelListResponse(BaseResponse[ModelListData]):
+    pass
+
+
 class ChatRequest(BaseRequest):
     """Request model for chat operations.
 
@@ -152,7 +238,7 @@ class ChatRequest(BaseRequest):
     history: MessageList | None = Field(None, description="Chat history")
     mode: SearchMode = Field(SearchMode.FAST, description="search mode: fast, fine, or mixture")
     system_prompt: str | None = Field(None, description="Base system prompt to use for chat")
-    top_k: int = Field(10, description="Number of results to return")
+    top_k: int = Field(10, ge=1, le=TOP_K_MAX, description="Number of results to return (max 25)")
     session_id: str | None = Field(None, description="Session ID for soft-filtering memories")
     include_preference: bool = Field(True, description="Whether to handle preference memory")
     pref_top_k: int = Field(6, description="Number of preference results to return")
@@ -163,6 +249,31 @@ class ChatRequest(BaseRequest):
     add_message_on_answer: bool = Field(True, description="Add dialogs to memory after chat")
     manager_user_id: str | None = Field(None, description="Manager User ID")
     project_id: str | None = Field(None, description="Project ID")
+    memory_limit_number: int | None = Field(
+        None,
+        ge=1,
+        le=TOP_K_MAX,
+        description=(
+            "Cloud-compatible alias for the recall size. When set it overrides "
+            "`top_k`. Range 1-25, aligned with the cloud recall cap."
+        ),
+    )
+    tags: list[str] | None = Field(
+        None, description="Custom tags written back with the chat turn (write-back only)."
+    )
+    info: dict[str, Any] | None = Field(
+        None, description="Business metadata written back with the chat turn (write-back only)."
+    )
+    agent_id: str | None = Field(
+        None, description="Agent ID written back with the chat turn (merged into `info`)."
+    )
+    app_id: str | None = Field(
+        None, description="App ID written back with the chat turn (merged into `info`)."
+    )
+    allow_public: bool = Field(
+        False,
+        description="Also write the chat turn into tenant-wide public memory (write-back only).",
+    )
     relativity: float = Field(
         0.45,
         ge=0,
@@ -232,6 +343,20 @@ class ChatRequest(BaseRequest):
 
         return self
 
+    @model_validator(mode="after")
+    def _apply_memory_limit_alias(self):
+        """`memory_limit_number` is the cloud name for the recall cap."""
+        if self.memory_limit_number is not None:
+            self.top_k = self.memory_limit_number
+        return self
+
+    @field_validator("filter")
+    @classmethod
+    def _normalize_filter_fields(cls, value):
+        from memos.search.filter_mapping import normalize_filter
+
+        return normalize_filter(value)
+
 
 class ChatPlaygroundRequest(ChatRequest):
     """Request model for chat operations in playground."""
@@ -257,7 +382,7 @@ class ChatCompleteRequest(BaseRequest):
     history: MessageList | None = Field(None, description="Chat history")
     internet_search: bool = Field(False, description="Whether to use internet search")
     system_prompt: str | None = Field(None, description="Base prompt to use for chat")
-    top_k: int = Field(10, description="Number of results to return")
+    top_k: int = Field(10, ge=1, le=TOP_K_MAX, description="Number of results to return (max 25)")
     threshold: float = Field(0.5, description="Threshold for filtering references")
     session_id: str | None = Field(None, description="Session ID for soft-filtering memories")
     include_preference: bool = Field(True, description="Whether to handle preference memory")
@@ -300,6 +425,15 @@ class UserRegisterResponse(BaseResponse[dict]):
 class MemoryResponse(BaseResponse[list]):
     """Response model for memory operations."""
 
+    usage: dict[str, int] | None = Field(
+        None,
+        description=(
+            "Serving this request accumulated LLM token usage: "
+            "prompt_tokens / completion_tokens / total_tokens / calls. "
+            "Absent when the request made no LLM call."
+        ),
+    )
+
 
 class SuggestionResponse(BaseResponse[list]):
     """Response model for suggestion operations."""
@@ -325,6 +459,14 @@ class ChatResponse(BaseResponse[str]):
 
 class GetMemoryResponse(BaseResponse[dict]):
     """Response model for getting memories."""
+
+
+class GetMemoryGraphResponse(BaseResponse[dict]):
+    """Response model for the dashboard graph view."""
+
+
+class GetEventMemoriesResponse(BaseResponse[dict]):
+    """Response model for event and Dream memories."""
 
 
 class DeleteMemoryResponse(BaseResponse[dict]):
@@ -359,19 +501,86 @@ class SearchRequest(BaseRequest):
     user_id: str = Field(..., description="User ID")
     query: str = Field(..., description="Search query")
     mem_cube_id: str | None = Field(None, description="Cube ID to search in")
-    top_k: int = Field(10, description="Number of results to return")
+    top_k: int = Field(10, ge=1, le=TOP_K_MAX, description="Number of results to return (max 25)")
     session_id: str | None = Field(None, description="Session ID for soft-filtering memories")
 
 
 class APISearchRequest(BaseRequest):
     """Request model for searching memories."""
 
+    #: Internal switch used by the cloud facade: ``memory_limit_number`` is a budget
+    #: across all views, not a per-view ``top_k``. Private so callers cannot set it.
+    _budget_across_views: bool = PrivateAttr(default=False)
+
+    # ==== Response shaping ====
+    include_sources: bool = Field(
+        False,
+        description=(
+            "Whether to include metadata.sources (conversation history) in the response. "
+            "Off by default: a single preference can carry hundreds of MB of sources."
+        ),
+    )
+
     # ==== Basic inputs ====
     query: str = Field(
         ...,
         description="User search query",
     )
-    user_id: str = Field(..., description="User ID")
+    user_id: str = Field(..., min_length=1, description="User ID")
+    agent_id: str | list[str] | None = Field(
+        None,
+        description=(
+            "Optional agent id (string or list). When set, memory in the agent's "
+            "own scope is included in the results."
+        ),
+    )
+    group_id: str | None = Field(
+        None,
+        description="Optional group id; includes group-shared memory in the results.",
+    )
+    app_id: str | None = Field(
+        None,
+        description=(
+            "Calling application id (cloud `app_id`). Added to the filter as `app_id = ...` "
+            "unless the filter already pins `app_id`."
+        ),
+    )
+    include_memory_view: (
+        list[Literal["detail_factual", "preference", "profile", "event", "skill", "tool_memory"]]
+        | None
+    ) = Field(
+        None,
+        description=(
+            "Cloud-compatible recall whitelist. When provided it takes precedence "
+            "over the legacy `include_preference` / `include_skill_memory` / "
+            "`search_tool_memory` switches."
+        ),
+    )
+    knowledgebase_ids: list[str] | None = Field(
+        None,
+        description=(
+            "Knowledge bases to recall alongside user memory. Accepted for contract "
+            "compatibility; KB recall is disabled while `KB_RECALL_ENABLED=false`."
+        ),
+    )
+    time_aware: bool | None = Field(
+        None,
+        description=(
+            "Read the time wording in `query` (e.g. 上周, 去年3月, 以前, last 7 days) and answer "
+            "for that moment: a window selects which version of a changeable fact (or which "
+            "event) was valid then, past wording attaches `history_versions`, and a query "
+            "without time wording returns only what is currently valid. Falls back to the "
+            "unrestricted result when nothing matches. Omit to follow the server default "
+            "(`SEARCH_TIME_AWARE`, off)."
+        ),
+    )
+    include_history: bool = Field(
+        False,
+        description=(
+            "Attach `metadata.history_versions` (earlier versions of the memory, newest "
+            "first) to each hit that has any. Does not change which memories are returned."
+        ),
+    )
 
     # ==== Cube scoping ====
     readable_cube_ids: list[str] | None = Field(
@@ -398,9 +607,13 @@ class APISearchRequest(BaseRequest):
 
     # ==== Result control ====
     top_k: int = Field(
-        10,
+        9,
         ge=1,
-        description="Number of textual memories to retrieve (top-K). Default: 10.",
+        le=TOP_K_MAX,
+        description=(
+            "Number of textual memories to retrieve (top-K). Default: 9, max: 25 "
+            "(aligned with the cloud recall cap)."
+        ),
     )
 
     relativity: float = Field(
@@ -420,6 +633,19 @@ class APISearchRequest(BaseRequest):
             "Use 'no' for no dedup, 'sim' for similarity dedup, 'mmr' for MMR-based dedup. "
             "If None, default exact-text dedup is applied."
         ),
+    )
+
+    sort_by: Literal["relativity", "created_at", "updated_at", "chat_time"] | None = Field(
+        None,
+        description=(
+            "Optional post-retrieval sort key. Leave unset to keep the retrieval "
+            "(relativity) order. `chat_time` sorts by the event time carried over "
+            "from the input messages."
+        ),
+    )
+    sort_order: Literal["asc", "desc"] = Field(
+        "desc",
+        description="Sort direction used when `sort_by` is set. Default: 'desc'.",
     )
 
     rerank: bool = Field(
@@ -442,6 +668,25 @@ class APISearchRequest(BaseRequest):
             "Whether to retrieve preference memories along with general memories. "
             "If enabled, the system will automatically recall user preferences "
             "relevant to the query. Default: True."
+        ),
+    )
+
+    dream_mem_top_k: int = Field(
+        1,
+        ge=0,
+        description=(
+            "Number of cross-case synthesis memories (daily digest + derived insights) "
+            "to append as extra slots. They are returned in a separate `dream_mem` bucket "
+            "and never compete with `text_mem`. Default: 1."
+        ),
+    )
+
+    include_dream_memory: bool = Field(
+        False,
+        description=(
+            "Whether to append cross-case synthesis memories along with general memories. "
+            "If enabled, the system will additionally recall daily digests and derived "
+            "insights relevant to the query. Default: False (opt-in)."
         ),
     )
 
@@ -474,7 +719,14 @@ class APISearchRequest(BaseRequest):
 
     context_format: str = Field(
         "memory",
-        description="Optional search context format passed through to installed plugins.",
+        description=(
+            "How hits read in the search context: 'memory' (default) returns the extracted "
+            "memory text; 'sources' returns the original messages each conversation hit was "
+            "extracted from (the extracted text moves to metadata.extracted_memory); 'mixed' "
+            "(alias 'heuristic_routing') picks one of the two per query. Any other value is "
+            "passed through to an installed search.context.render plugin, and rejected with "
+            "422 when none is installed."
+        ),
     )
 
     # ==== Filter conditions ====
@@ -512,7 +764,7 @@ class APISearchRequest(BaseRequest):
             "Memory category to search. Supported values include All, WorkingMemory, "
             "LongTermMemory, UserMemory, OuterMemory, ToolSchemaMemory, "
             "ToolTrajectoryMemory, RawFileMemory, AllSummaryMemory, SkillMemory, "
-            "and PreferenceMemory. Default: All."
+            "PreferenceMemory, DreamDiary, and InsightMemory. Default: All."
         ),
     )
 
@@ -604,6 +856,54 @@ class APISearchRequest(BaseRequest):
 
         return self
 
+    @model_validator(mode="after")
+    def _apply_include_memory_view(self) -> "APISearchRequest":
+        """`include_memory_view` overrides the legacy per-type switches."""
+        from memos.memories.textual.owner import normalize_id_list
+
+        normalize_id_list(self.agent_id)
+
+        views = self.include_memory_view
+        if views is None:
+            return self
+        self.include_preference = "preference" in views
+        self.include_skill_memory = "skill" in views
+        self.search_tool_memory = "tool_memory" in views
+        return self
+
+    @model_validator(mode="after")
+    def _apply_app_id(self) -> "APISearchRequest":
+        """Cloud `app_id` narrows the recall to memories written by that application."""
+        if self.app_id:
+            self.filter = _and_condition(self.filter, {"app_id": self.app_id})
+        return self
+
+    @field_validator("filter")
+    @classmethod
+    def _normalize_filter_fields(cls, value):
+        from memos.search.filter_mapping import normalize_filter
+
+        return normalize_filter(value)
+
+
+def _and_condition(filter_: dict[str, Any] | None, condition: dict[str, Any]) -> dict[str, Any]:
+    """Add one more condition to an already-normalized filter."""
+    if not filter_:
+        return condition
+    if set(filter_) == {"and"}:
+        return {"and": [*filter_["and"], condition]}
+    if set(filter_) & {"and", "or"}:
+        return {"and": [filter_, condition]}
+    from memos.search.filter_mapping import is_per_cube_map
+
+    if is_per_cube_map(filter_):
+        per_cube: dict[str, Any] = {}
+        for cube_id, node in filter_.items():
+            children = node["and"] if set(node) == {"and"} else [node]
+            per_cube[cube_id] = {"and": [*children, condition]}
+        return per_cube
+    return {"and": [filter_, condition]}
+
 
 class APIADDRequest(BaseRequest):
     """Request model for creating memories."""
@@ -624,7 +924,54 @@ class APIADDRequest(BaseRequest):
     }
 
     # ==== Basic identifiers ====
-    user_id: str = Field(None, description="User ID")
+    user_id: str | list[str] = Field(
+        None,
+        description=(
+            "User ID. A list is accepted for group chat: one memory view is "
+            "extracted per participant (max 20 ids)."
+        ),
+    )
+    agent_id: str | list[str] | None = Field(
+        None,
+        description=(
+            "Agent ID (string or list, max 20). With "
+            "`MEMOS_AGENT_MEMORY_ENABLED=true` each agent also gets an "
+            "independent memory view; otherwise it is only a filterable tag."
+        ),
+    )
+    group_id: str | None = Field(
+        None,
+        description=(
+            "Group / conversation id. When set, a group-shared memory view is "
+            "written in addition to the per-participant views."
+        ),
+    )
+    app_id: str | None = Field(
+        None,
+        description=(
+            "Calling application id (cloud `app_id`). Stored on every node as `app_id` "
+            "and usable as a filter; an explicit `info.app_id` wins."
+        ),
+    )
+    allow_public: bool = Field(
+        False,
+        description="Also write this conversation into tenant-wide public memory.",
+    )
+    allow_memory_view: (
+        list[Literal["detail_factual", "preference", "profile", "event", "skill", "tool_memory"]]
+        | None
+    ) = Field(
+        None,
+        description=(
+            "Write-side generation whitelist (cloud `allow_memory_view`). "
+            "Omit to generate every type (historical behavior); an empty list "
+            "generates nothing."
+        ),
+    )
+    expires_at: str | None = Field(
+        None,
+        description="Optional ISO 8601 expiry time applied to the memories written by this request.",
+    )
     session_id: str | None = Field(
         None,
         description="Session ID. If not provided, a default session will be used.",
@@ -666,6 +1013,24 @@ class APIADDRequest(BaseRequest):
             "These tags can be used as filters in search."
         ),
     )
+    custom_tags_match: bool | None = Field(
+        None,
+        description=(
+            "Treat `custom_tags` as candidates and add the ones semantically close to each "
+            "memory (embedding similarity, no extra LLM call). Omit to follow the server "
+            "default (`CUSTOM_TAGS_SEMANTIC_MATCH`, off)."
+        ),
+    )
+
+    custom_extract_prompt: dict[str, str] | None = Field(
+        None,
+        description=(
+            "Per-request extraction guidance keyed by stage: detail_factual, preference, "
+            "skill, profile, event, tool_memory, image, document. The text only decides what "
+            "to extract or ignore; the output structure stays the default. 'document' falls "
+            "back to 'detail_factual'. Each value is at most 4000 characters."
+        ),
+    )
 
     info: dict[str, Any] | None = Field(
         None,
@@ -695,6 +1060,13 @@ class APIADDRequest(BaseRequest):
             "    (input_text / input_image / input_file, etc.). "
             "Also supports pure input items when there is no dialog."
         ),
+    )
+    # The public ``MessagesType`` is OpenAI's typed-dict union, which drops
+    # cloud-only fields such as ``role_id`` / ``role_name`` / ``chat_time``.
+    # Group chat needs them for per-participant attribution, so keep one raw
+    # copy before validation (excluded from responses / OpenAPI).
+    raw_messages: SkipJsonSchema[list[dict[str, Any]] | None] = Field(
+        None, exclude=True, description="(Internal) raw message dicts before validation"
     )
 
     # ==== Chat history ====
@@ -749,6 +1121,29 @@ class APIADDRequest(BaseRequest):
         None,
         description="(Internal) Operation definitions for multi-cube write permissions.",
     )
+
+    @field_validator("custom_extract_prompt", mode="before")
+    @classmethod
+    def _validate_custom_extract_prompt(cls, value: Any) -> dict[str, str] | None:
+        from memos.mem_reader.custom_extract import normalize_custom_extract_prompt
+
+        return normalize_custom_extract_prompt(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _preserve_raw_messages(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        # Always derive from ``messages``: never accept a caller-supplied
+        # sidecar that could bypass message validation / size limits.
+        copied = dict(data)
+        raw = copied.get("messages")
+        copied["raw_messages"] = (
+            [message for message in raw if isinstance(message, dict)]
+            if isinstance(raw, list)
+            else None
+        )
+        return copied
 
     @model_validator(mode="after")
     def _convert_deprecated_fields(self) -> "APIADDRequest":
@@ -830,11 +1225,144 @@ class APIADDRequest(BaseRequest):
 
         return self
 
+    @model_validator(mode="after")
+    def _validate_owner_ids(self) -> "APIADDRequest":
+        """Bound the group-chat id lists (cloud: max 20 per request)."""
+        from memos.memories.textual.owner import normalize_id_list
+
+        normalize_id_list(self.user_id)
+        normalize_id_list(self.agent_id)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_multimodal_limits(self) -> "APIADDRequest":
+        """Enforce the cloud file/token caps and force async for multimodal input."""
+        from memos.api.request_validation import inspect_add_messages
+
+        inspection = inspect_add_messages(self.messages)
+        if inspection.has_multimodal:
+            # Cloud contract: file memories take long to process, so a multimodal
+            # request always runs asynchronously even if the caller asked for sync.
+            self.async_mode = "async"
+        return self
+
+    @model_validator(mode="after")
+    def _merge_app_id_into_info(self) -> "APIADDRequest":
+        if self.app_id and "app_id" not in (self.info or {}):
+            self.info = {**(self.info or {}), "app_id": self.app_id}
+        return self
+
+
+class APIExtractRequest(BaseRequest):
+    """Request model for the dry-run extraction endpoint.
+
+    Same input surface as ``APIADDRequest`` minus feedback/upload flags, but the
+    reader output is returned directly and **nothing is persisted**. Mirrors the
+    cloud ``extract/memory`` contract: extract facts/preferences only.
+    """
+
+    user_id: str = Field(..., description="User ID")
+    session_id: str | None = Field(
+        None,
+        description="Session ID. If not provided, a default session will be used.",
+    )
+    task_id: str | None = Field(None, description="Task ID for call correlation")
+    manager_user_id: str | None = Field(None, description="Manager User ID")
+    project_id: str | None = Field(None, description="Project ID")
+
+    writable_cube_ids: list[str] | None = Field(
+        None, description="List of cube IDs to extract against for multi-cube reads"
+    )
+    mem_cube_id: str | None = Field(
+        None,
+        description="(Deprecated) Single cube ID. Prefer `writable_cube_ids`.",
+    )
+
+    mode: Literal["fast", "fine"] = Field(
+        "fine",
+        description=(
+            "Extraction pipeline: 'fine' runs the full reader (facts + preferences), "
+            "'fast' runs the lightweight path. Default: 'fine'."
+        ),
+    )
+    extraction_types: list[Literal["memory", "preference"]] | None = Field(
+        None,
+        description=(
+            "Cloud `extraction_types`: keep only these kinds of output. Unset returns "
+            "everything the pipeline produced."
+        ),
+    )
+
+    custom_tags: list[str] | None = Field(
+        None, description="Custom tags to attach to extracted memories."
+    )
+    custom_extract_prompt: dict[str, str] | None = Field(
+        None,
+        description=(
+            "Per-request extraction guidance keyed by stage: detail_factual, preference, "
+            "skill, profile, event, tool_memory, image, document. The text only decides what "
+            "to extract or ignore; the output structure stays the default. 'document' falls "
+            "back to 'detail_factual'. Each value is at most 4000 characters."
+        ),
+    )
+    info: dict[str, Any] | None = Field(
+        None, description="Additional metadata used by extraction and filters."
+    )
+    messages: MessagesType = Field(..., description="Messages to extract memories from.")
+    raw_messages: SkipJsonSchema[list[dict[str, Any]] | None] = Field(
+        None, exclude=True, description="(Internal) raw message dicts before validation"
+    )
+    chat_history: MessageList | None = Field(
+        None, description="Historical chat messages used by extraction algorithms."
+    )
+
+    @field_validator("custom_extract_prompt", mode="before")
+    @classmethod
+    def _validate_custom_extract_prompt(cls, value: Any) -> dict[str, str] | None:
+        from memos.mem_reader.custom_extract import normalize_custom_extract_prompt
+
+        return normalize_custom_extract_prompt(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _preserve_raw_messages(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        # Always derive from ``messages``: never accept a caller-supplied
+        # sidecar that could bypass message validation / size limits.
+        copied = dict(data)
+        raw = copied.get("messages")
+        copied["raw_messages"] = (
+            [message for message in raw if isinstance(message, dict)]
+            if isinstance(raw, list)
+            else None
+        )
+        return copied
+
+    @model_validator(mode="after")
+    def _convert_deprecated_fields(self) -> "APIExtractRequest":
+        if self.mem_cube_id and not self.writable_cube_ids:
+            logger.warning(
+                "APIExtractRequest.mem_cube_id is deprecated. Use `writable_cube_ids` instead."
+            )
+            self.writable_cube_ids = [self.mem_cube_id]
+        return self
+
+    @model_validator(mode="after")
+    def _validate_limits(self) -> "APIExtractRequest":
+        from memos.api.request_validation import inspect_add_messages
+
+        inspect_add_messages(self.messages)
+        return self
+
 
 class APIFeedbackRequest(BaseRequest):
     """Request model for processing feedback info."""
 
     user_id: str = Field(..., description="User ID")
+    agent_id: str | None = Field(None, description="Agent the feedback belongs to")
+    app_id: str | None = Field(None, description="Calling application id")
+    allow_public: bool = Field(False, description="Allow the correction to become public memory")
     session_id: str | None = Field(
         "default_session", description="Session ID for soft-filtering memories"
     )
@@ -889,7 +1417,7 @@ class APIChatCompleteRequest(BaseRequest):
     history: MessageList | None = Field(None, description="Chat history")
     mode: SearchMode = Field(SearchMode.FAST, description="search mode: fast, fine, or mixture")
     system_prompt: str | None = Field(None, description="Base system prompt to use for chat")
-    top_k: int = Field(10, description="Number of results to return")
+    top_k: int = Field(10, ge=1, le=TOP_K_MAX, description="Number of results to return (max 25)")
     session_id: str | None = Field(None, description="Session ID for soft-filtering memories")
     include_preference: bool = Field(True, description="Whether to handle preference memory")
     pref_top_k: int = Field(6, description="Number of preference results to return")
@@ -900,6 +1428,31 @@ class APIChatCompleteRequest(BaseRequest):
     add_message_on_answer: bool = Field(True, description="Add dialogs to memory after chat")
     manager_user_id: str | None = Field(None, description="Manager User ID")
     project_id: str | None = Field(None, description="Project ID")
+    memory_limit_number: int | None = Field(
+        None,
+        ge=1,
+        le=TOP_K_MAX,
+        description=(
+            "Cloud-compatible alias for the recall size. When set it overrides "
+            "`top_k`. Range 1-25, aligned with the cloud recall cap."
+        ),
+    )
+    tags: list[str] | None = Field(
+        None, description="Custom tags written back with the chat turn (write-back only)."
+    )
+    info: dict[str, Any] | None = Field(
+        None, description="Business metadata written back with the chat turn (write-back only)."
+    )
+    agent_id: str | None = Field(
+        None, description="Agent ID written back with the chat turn (merged into `info`)."
+    )
+    app_id: str | None = Field(
+        None, description="App ID written back with the chat turn (merged into `info`)."
+    )
+    allow_public: bool = Field(
+        False,
+        description="Also write the chat turn into tenant-wide public memory (write-back only).",
+    )
     relativity: float = Field(
         0.45,
         ge=0,
@@ -931,6 +1484,20 @@ class APIChatCompleteRequest(BaseRequest):
         False, description="(Deprecated) Whether to use legacy MemOSCube pipeline"
     )
 
+    @model_validator(mode="after")
+    def _apply_memory_limit_alias(self):
+        """`memory_limit_number` is the cloud name for the recall cap."""
+        if self.memory_limit_number is not None:
+            self.top_k = self.memory_limit_number
+        return self
+
+    @field_validator("filter")
+    @classmethod
+    def _normalize_filter_fields(cls, value):
+        from memos.search.filter_mapping import normalize_filter
+
+        return normalize_filter(value)
+
 
 class AddStatusRequest(BaseRequest):
     """Request model for checking add status."""
@@ -940,18 +1507,86 @@ class AddStatusRequest(BaseRequest):
     session_id: str | None = Field(None, description="Session ID")
 
 
+class GetMemoryByIdsRequest(BaseModel):
+    """Body for ``POST /product/get_memory_by_ids``.
+
+    Contract v2 uses this object shape. The legacy bare-array shape
+    (``["id-1", "id-2"]``) is still accepted during the transition, but it is
+    not part of the contract.
+    """
+
+    memory_ids: list[str] = Field(
+        default_factory=list,
+        description="Memory IDs to fetch. The response contains the subset that exists.",
+    )
+    include_sources: bool = Field(
+        False,
+        description=(
+            "Whether to include metadata.sources (conversation history) in the response. "
+            "Off by default: a single preference can carry hundreds of MB of sources."
+        ),
+    )
+
+
 class GetMemoryRequest(BaseRequest):
     """Request model for getting memories."""
 
-    mem_cube_id: str = Field(..., description="Cube ID")
+    mem_cube_id: str | None = Field(None, description="Cube ID; defaults to `user_id`")
     user_id: str | None = Field(None, description="User ID")
+    agent_id: str | list[str] | None = Field(
+        None, description="Only memories related to these agents (cloud `agent_id`)"
+    )
     include_preference: bool = Field(True, description="Whether to return preference memory")
     include_tool_memory: bool = Field(True, description="Whether to return tool memory")
+    include_sources: bool = Field(
+        False,
+        description=(
+            "Whether to include metadata.sources (conversation history) in the response. "
+            "Off by default: a single preference can carry hundreds of MB of sources."
+        ),
+    )
     include_skill_memory: bool = Field(True, description="Whether to return skill memory")
+    include_memory_view: (
+        list[Literal["detail_factual", "preference", "profile", "event", "skill", "tool_memory"]]
+        | None
+    ) = Field(
+        None,
+        description=(
+            "Cloud-compatible view whitelist. When provided it takes precedence over "
+            "`include_preference` / `include_tool_memory` / `include_skill_memory`; "
+            "`profile` adds a `profile_mem` bucket and `event` splits events out of `text_mem`."
+        ),
+    )
     filter: dict[str, Any] | None = Field(
         None,
         description="Optional metadata filter applied when retrieving memories.",
     )
+    page: int | None = Field(1, ge=1, description="Page number, starting at 1 (cloud default 1)")
+    page_size: int | None = Field(
+        10, ge=1, description="Items per page (cloud default 10); None exports everything"
+    )
+
+    @model_validator(mode="after")
+    def _resolve_tenant_and_views(self) -> "GetMemoryRequest":
+        self.mem_cube_id = (self.mem_cube_id or "").strip() or self.user_id
+        views = self.include_memory_view
+        if views is not None:
+            self.include_preference = "preference" in views
+            self.include_tool_memory = "tool_memory" in views
+            self.include_skill_memory = "skill" in views
+        return self
+
+    @field_validator("filter")
+    @classmethod
+    def _normalize_filter_fields(cls, value):
+        from memos.search.filter_mapping import normalize_filter
+
+        return normalize_filter(value)
+
+
+class GetMemoryDashboardRequest(GetMemoryRequest):
+    """Request model for getting memories for dashboard."""
+
     page: int | None = Field(
         None,
         description="Page number (starts from 1). If None, exports all data without pagination.",
@@ -961,10 +1596,72 @@ class GetMemoryRequest(BaseRequest):
     )
 
 
-class GetMemoryDashboardRequest(GetMemoryRequest):
-    """Request model for getting memories for dashboard."""
+class GetMemoryGraphRequest(BaseRequest):
+    """Request model for the dashboard graph view (nodes plus PARENT/MERGED_TO edges)."""
 
-    mem_cube_id: str | None = Field(None, description="Cube ID")
+    mem_cube_id: str | None = Field(None, description="Cube ID; defaults to `user_id`")
+    user_id: str | None = Field(None, description="User ID; fallback for `mem_cube_id`")
+    memory_types: list[str] | None = Field(
+        None,
+        description="Only return nodes of these memory types; omitted or empty means all types.",
+    )
+    status: list[str] = Field(
+        default_factory=lambda: ["activated"],
+        description="Only return nodes in these lifecycle statuses; defaults to activated.",
+    )
+    limit: int = Field(
+        2000, ge=1, le=10_000, description="Maximum number of nodes and edges to return."
+    )
+    label_max: int = Field(
+        200, ge=1, le=4000, description="Maximum label length stored on each node."
+    )
+    include_edges: bool = Field(True, description="Return PARENT/MERGED_TO edges as well.")
+
+    @model_validator(mode="after")
+    def _resolve_tenant_and_defaults(self) -> "GetMemoryGraphRequest":
+        self.mem_cube_id = (self.mem_cube_id or "").strip() or (self.user_id or "").strip()
+        if not self.mem_cube_id:
+            raise ValueError("mem_cube_id or user_id is required")
+        if not self.memory_types:
+            self.memory_types = None
+        if not self.status:
+            self.status = ["activated"]
+        return self
+
+
+class GetEventMemoriesRequest(BaseRequest):
+    """Request model for event and Dream memories, paginated by created_at."""
+
+    mem_cube_id: str | None = Field(None, description="Cube ID; defaults to `user_id`")
+    user_id: str | None = Field(None, description="User ID; fallback for `mem_cube_id`")
+    memory_types: list[str] = Field(
+        default_factory=lambda: ["EventMemory", "Context", "InsightMemory", "DreamDiary"],
+        description="Memory types to include. Empty means all types.",
+    )
+    status: list[str] | None = Field(
+        None,
+        description=(
+            "Only return nodes in these lifecycle statuses; omitted or empty means every "
+            "status except deleted (Dream diaries use completed/context_only)."
+        ),
+    )
+    search_query: str | None = Field(
+        None, description="Case-sensitive substring matched against the memory text."
+    )
+    page: int = Field(1, ge=1, description="Page number, starting at 1.")
+    page_size: int = Field(20, ge=1, le=200, description="Items per page.")
+
+    @model_validator(mode="after")
+    def _resolve_tenant_and_defaults(self) -> "GetEventMemoriesRequest":
+        self.mem_cube_id = (self.mem_cube_id or "").strip() or (self.user_id or "").strip()
+        if not self.mem_cube_id:
+            raise ValueError("mem_cube_id or user_id is required")
+        if not self.memory_types:
+            self.memory_types = []
+        if not self.status:
+            self.status = None
+        self.search_query = (self.search_query or "").strip() or None
+        return self
 
 
 class DeleteMemoryRequest(BaseRequest):
@@ -981,6 +1678,15 @@ class DeleteMemoryRequest(BaseRequest):
         None,
         description="Quick delete condition: remove memories for this user_id.",
     )
+    agent_id: str | None = Field(
+        None,
+        description=(
+            "Quick delete condition: remove the independent memories owned by this agent "
+            "(owner_type=agent). The tenant comes from `writable_cube_ids`, or from "
+            "`user_id` when no cube is named. Memories of users that merely carry this "
+            "agent_id as a compatibility property are kept."
+        ),
+    )
     session_id: str | None = Field(
         None,
         description="Quick delete condition: remove memories for this session_id.",
@@ -996,6 +1702,26 @@ class DeleteMemoryRequest(BaseRequest):
             "based on working_binding metadata when deleting by memory_ids."
         ),
     )
+
+    @field_validator("agent_id")
+    @classmethod
+    def _strip_agent_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("agent_id must not be empty")
+        return value
+
+    @field_validator("filter")
+    @classmethod
+    def _normalize_filter_fields(cls, value):
+        from memos.search.filter_mapping import normalize_filter
+
+        # Keep an explicit empty object so the handler can report a precise error.
+        if value == {}:
+            return value
+        return normalize_filter(value)
 
     @model_validator(mode="after")
     def normalize_session_alias(self) -> "DeleteMemoryRequest":
@@ -1480,3 +2206,296 @@ class RecoverMemoryByRecordIdRequest(BaseRequest):
 
 class RecoverMemoryByRecordIdResponse(BaseResponse[dict]):
     """Response model for recovering memory by record id."""
+
+
+# ─── Cloud parity: update / status / knowledge base / profile ──────────────────
+
+
+MEMORY_VIEW_VALUES = ("detail_factual", "preference", "profile", "event", "skill", "tool_memory")
+
+
+class UpdateMemoryRequest(BaseRequest):
+    """Request model for manually updating one memory.
+
+    Mirrors the cloud ``update/memory`` contract. ``content`` and ``title``
+    rewrite the memory (the embedding is recomputed and both the graph and the
+    vector payload are updated); ``status`` only transitions lifecycle state.
+    """
+
+    memory_id: str = Field(..., description="Memory id from search/get results")
+    content: str | None = Field(None, description="New memory content")
+    title: str | None = Field(None, description="New memory title (stored as `key`)")
+    status: Literal["activated", "archived", "frozen", "expired"] | None = Field(
+        None, description="New lifecycle status"
+    )
+    user_id: str | None = Field(
+        None,
+        description=(
+            "Optional ownership check. When provided the memory must belong to "
+            "this user (node `user_name` or `user_id`)."
+        ),
+    )
+    mem_cube_id: str | None = Field(
+        None, description="Optional tenant/cube id used to scope the lookup"
+    )
+    metadata: dict[str, Any] | None = Field(
+        None, description="Optional extra metadata fields to merge (does not rewrite content)"
+    )
+
+    @model_validator(mode="after")
+    def _require_change(self) -> "UpdateMemoryRequest":
+        if not any(
+            value is not None for value in (self.content, self.title, self.status, self.metadata)
+        ):
+            raise ValueError("content, title, status or metadata is required")
+        if self.content is not None and not self.content.strip():
+            raise ValueError("content must not be empty")
+        return self
+
+
+class UpdateMemoryResponse(BaseResponse[dict]):
+    """Response model for update memory operations."""
+
+
+class AddStatusRequestV2(BaseRequest):
+    """Request model for ``/product/add_status`` (cloud ``get/status``)."""
+
+    user_id: str | None = Field(None, description="User ID the task belongs to")
+    task_id: str = Field(..., description="Business task id returned by add")
+    mem_cube_id: str | None = Field(None, description="Optional cube id")
+
+
+class AddStatusResponseV2(BaseResponse[dict]):
+    """Response model for the add status endpoint."""
+
+
+class GetMessageRequest(BaseRequest):
+    """Request model for ``/product/get_message`` (cloud ``get/message``)."""
+
+    user_id: str = Field(..., min_length=1, description="User the conversation belongs to")
+    conversation_id: str | None = Field(
+        None, description="Conversation to read; same as `session_id` on add"
+    )
+    session_id: str | None = Field(None, description="Alias of `conversation_id`")
+    mem_cube_id: str | None = Field(
+        None, description="Tenant / cube the messages were added to; defaults to `user_id`"
+    )
+    message_limit_number: int = Field(
+        6, ge=1, le=50, description="How many of the latest messages to return, oldest first"
+    )
+
+    @model_validator(mode="after")
+    def _resolve_conversation(self) -> "GetMessageRequest":
+        self.user_id = self.user_id.strip()
+        if not self.user_id:
+            raise ValueError("user_id must not be blank")
+        self.mem_cube_id = (self.mem_cube_id or "").strip() or None
+        if self.conversation_id and self.session_id and self.conversation_id != self.session_id:
+            raise ValueError("conversation_id and session_id must be the same when both are set")
+        self.conversation_id = self.conversation_id or self.session_id
+        if not self.conversation_id:
+            raise ValueError("conversation_id is required")
+        return self
+
+
+class GetMessageResponse(BaseResponse[dict]):
+    """Response model for the get message endpoint."""
+
+
+class RerankRequest(BaseRequest):
+    """Request model for ``/product/rerank`` (cloud ``rerank``)."""
+
+    query: str = Field(..., min_length=1, description="Query the documents are scored against")
+    documents: list[str] = Field(..., min_length=1, description="Candidate texts, each one memory")
+    model: str | None = Field(
+        None, description="Accepted for contract compatibility; the deployment's reranker is used"
+    )
+    top_n: int | None = Field(None, ge=1, description="Return only the top N; all by default")
+
+
+class RerankResponse(BaseResponse[dict]):
+    """Response model for the rerank endpoint."""
+
+
+class KnowledgeBaseCreateRequest(BaseRequest):
+    """Create a knowledge base (cloud ``create/knowledgebase``)."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    knowledgebase_name: str = Field(..., min_length=1, description="Knowledge base name")
+    knowledgebase_description: str | None = Field(None, description="Description")
+
+
+class KnowledgeBaseDeleteRequest(BaseRequest):
+    """Request model for ``/product/delete_knowledgebase`` (cloud ``delete/knowledgebase``)."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    knowledgebase_id: str = Field(..., description="Knowledge base id")
+    delete_all: bool = Field(
+        False,
+        description=(
+            "Cloud `delete_all`. Accepted for contract compatibility: our bases are "
+            "tenant-scoped and have no project link, so both values delete the base and files."
+        ),
+    )
+
+
+class KnowledgeBaseUpdateRequest(BaseRequest):
+    """Rename a knowledge base or replace its description."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    knowledgebase_id: str = Field(..., description="Knowledge base id")
+    knowledgebase_name: str | None = Field(None, min_length=1, description="New name")
+    knowledgebase_description: str | None = Field(None, description="New description")
+
+
+class KnowledgeBaseListRequest(BaseRequest):
+    """List / get knowledge bases."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    knowledgebase_id: str | None = Field(None, description="Get one knowledge base")
+    page: int | None = Field(None, ge=1, description="Page number (1-based)")
+    page_size: int | None = Field(None, ge=1, le=200, description="Page size")
+
+
+class KnowledgeBaseFileAddRequest(BaseRequest):
+    """Add files to a knowledge base.
+
+    ``file`` accepts cloud's JSON form: a list of ``{"content": "<url>"}`` or
+    ``{"name": ..., "content": "<base64, data URL or url>", "type": "document|skill"}``.
+    A file's own ``type`` wins over the request-level ``type``. Multipart upload
+    uses the same route with ``upload`` files (handled by the router).
+    """
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    knowledgebase_id: str = Field(..., description="Knowledge base id")
+    file: list[dict[str, Any]] | None = Field(None, description="Cloud JSON file list")
+    type: str | None = Field(None, description="Optional file category, e.g. 'skill'")
+
+
+class KnowledgeBaseFileDeleteRequest(BaseRequest):
+    """Delete knowledge base files."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    file_ids: list[str] = Field(..., min_length=1, description="File ids")
+
+
+class KnowledgeBaseFileListRequest(BaseRequest):
+    """List / get knowledge base files."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    knowledgebase_id: str | None = Field(None, description="List files of a KB")
+    file_ids: list[str] | None = Field(None, description="Get specific files")
+    type: str | None = Field(None, description="Optional file category")
+    page: int | None = Field(None, ge=1, description="Page number (1-based)")
+    page_size: int | None = Field(None, ge=1, le=200, description="Page size")
+
+
+class KnowledgeBaseFileDownloadRequest(BaseRequest):
+    """Download one knowledge base file."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    file_id: str = Field(..., description="File id")
+
+
+class ProfileTemplateCreateRequest(BaseRequest):
+    """Create a profile template."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    name: str = Field(..., min_length=1, description="Template name")
+    metadata: dict[str, Any] = Field(..., description="Template tree (max 3 levels)")
+
+
+class ProfileTemplateUpdateRequest(BaseRequest):
+    """Update a profile template (cascades to bound instances)."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    profile_template_id: str = Field(..., description="Template id")
+    name: str | None = Field(None, description="New template name")
+    metadata: dict[str, Any] | None = Field(None, description="New template tree")
+
+
+class ProfileTemplateQueryRequest(BaseRequest):
+    """List / get profile templates."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    profile_template_id: str | None = Field(None, description="Get one template")
+    page: int | None = Field(None, ge=1, description="Page number (1-based)")
+    page_size: int | None = Field(None, ge=1, le=200, description="Page size")
+    size: int | None = Field(None, ge=1, le=200, description="Page size (cloud name)")
+
+
+class ProfileTemplateDeleteRequest(BaseRequest):
+    """Delete a profile template; bound instances become `detached`."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    profile_template_id: str = Field(..., description="Template id")
+
+
+class ProfileBindRequest(BaseRequest):
+    """Bind subjects to profile templates."""
+
+    user_id: str | None = Field(None, description="Owner user id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    bind_list: list[dict[str, Any]] = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="Items like {user_id|agent_id, profile_template_id}, at most 20",
+    )
+
+
+class ProfileEditRequest(BaseRequest):
+    """Edit one profile instance."""
+
+    user_id: str | None = Field(None, description="Subject user id")
+    agent_id: str | None = Field(None, description="Subject agent id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    profile_template_id: str = Field(..., description="Template id")
+    metadata: dict[str, Any] | None = Field(None, description="Field values to set")
+    remove_fields: list[str] | None = Field(None, description="Field paths to remove")
+
+    @model_validator(mode="after")
+    def _require_subject_and_change(self) -> "ProfileEditRequest":
+        if not self.user_id and not self.agent_id:
+            raise ValueError("user_id or agent_id is required")
+        if self.user_id and self.agent_id:
+            raise ValueError("user_id and agent_id are mutually exclusive")
+        if self.metadata is None and not self.remove_fields:
+            raise ValueError("metadata or remove_fields is required")
+        return self
+
+
+class ProfileDeleteRequest(BaseRequest):
+    """Delete one profile instance."""
+
+    user_id: str | None = Field(None, description="Subject user id")
+    agent_id: str | None = Field(None, description="Subject agent id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    profile_template_id: str = Field(..., description="Template id")
+
+    @model_validator(mode="after")
+    def _require_subject(self) -> "ProfileDeleteRequest":
+        if bool(self.user_id) == bool(self.agent_id):
+            raise ValueError("exactly one of user_id or agent_id is required")
+        return self
+
+
+class ProfileQueryRequest(BaseRequest):
+    """Get the profile instances of one subject."""
+
+    user_id: str | None = Field(None, description="Subject user id")
+    agent_id: str | None = Field(None, description="Subject agent id")
+    mem_cube_id: str | None = Field(None, description="Tenant / cube id")
+    profile_template_id: str | None = Field(None, description="Optional template filter")

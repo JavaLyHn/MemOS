@@ -46,6 +46,7 @@ from memos.templates.mos_prompts import (
     get_memos_prompt,
 )
 from memos.types import MessageList
+from memos.utils import utc_now, utc_now_iso
 
 
 class ChatHandler(BaseHandler):
@@ -92,6 +93,7 @@ class ChatHandler(BaseHandler):
 
         self.chat_llms = chat_llms
         self.playground_chat_llms = playground_chat_llms or chat_llms
+        self.suggestion_llm = getattr(dependencies, "suggestion_llm", dependencies.llm)
         self.search_handler = search_handler
         self.add_handler = add_handler
         self.online_bot = online_bot
@@ -207,6 +209,7 @@ class ChatHandler(BaseHandler):
                 # Resolve writable cube IDs (for add)
                 writable_cube_ids = chat_req.writable_cube_ids or [chat_req.user_id]
                 start = time.time()
+                tags, info = self._writeback_meta(chat_req)
                 self._start_add_to_memory(
                     user_id=chat_req.user_id,
                     writable_cube_ids=writable_cube_ids,
@@ -216,6 +219,9 @@ class ChatHandler(BaseHandler):
                     async_mode="async",
                     manager_user_id=chat_req.manager_user_id,
                     project_id=chat_req.project_id,
+                    tags=tags,
+                    info=info,
+                    allow_public=bool(getattr(chat_req, "allow_public", False)),
                 )
                 end = time.time()
                 self.logger.info(f"[Cloud Service] Chat Add Time: {end - start} seconds")
@@ -382,6 +388,7 @@ class ChatHandler(BaseHandler):
                             [chat_req.mem_cube_id] if chat_req.mem_cube_id else [chat_req.user_id]
                         )
                         start = time.time()
+                        tags, info = self._writeback_meta(chat_req)
                         self._start_add_to_memory(
                             user_id=chat_req.user_id,
                             writable_cube_ids=writable_cube_ids,
@@ -391,6 +398,9 @@ class ChatHandler(BaseHandler):
                             async_mode="async",
                             manager_user_id=chat_req.manager_user_id,
                             project_id=chat_req.project_id,
+                            tags=tags,
+                            info=info,
+                            allow_public=bool(getattr(chat_req, "allow_public", False)),
                         )
                         end = time.time()
                         self.logger.info(
@@ -538,7 +548,10 @@ class ChatHandler(BaseHandler):
                         yield f"data: {json.dumps({'type': 'status', 'data': 'start_internet_search'})}\n\n"
 
                     # ======  second deep search  ======
-                    search_req = APISearchRequest(
+                    # The public API caps top_k at 25 (cloud recall cap). The
+                    # playground's second pass is internal and deliberately
+                    # searches wider, so bypass the public bound here.
+                    search_req = APISearchRequest.model_construct(
                         query=(parsed_goal.rephrased_query or chat_req.query)
                         + (f" {parsed_goal.memories}" if parsed_goal.memories else ""),
                         user_id=chat_req.user_id,
@@ -565,6 +578,7 @@ class ChatHandler(BaseHandler):
                     )
 
                     # for playground, add the query to memory without response
+                    tags, info = self._writeback_meta(chat_req)
                     self._start_add_to_memory(
                         user_id=chat_req.user_id,
                         writable_cube_ids=writable_cube_ids,
@@ -574,6 +588,9 @@ class ChatHandler(BaseHandler):
                         async_mode="sync",
                         manager_user_id=chat_req.manager_user_id,
                         project_id=chat_req.project_id,
+                        tags=tags,
+                        info=info,
+                        allow_public=bool(getattr(chat_req, "allow_public", False)),
                     )
 
                     # Extract memories from search results (second search)
@@ -736,6 +753,7 @@ class ChatHandler(BaseHandler):
                         speed_improvement=speed_improvement,
                         current_messages=current_messages,
                     )
+                    tags, info = self._writeback_meta(chat_req)
                     self._start_add_to_memory(
                         user_id=chat_req.user_id,
                         writable_cube_ids=writable_cube_ids,
@@ -745,6 +763,9 @@ class ChatHandler(BaseHandler):
                         async_mode="sync",
                         manager_user_id=chat_req.manager_user_id,
                         project_id=chat_req.project_id,
+                        tags=tags,
+                        info=info,
+                        allow_public=bool(getattr(chat_req, "allow_public", False)),
                     )
 
                 except Exception as e:
@@ -925,6 +946,7 @@ class ChatHandler(BaseHandler):
                             [chat_req.mem_cube_id] if chat_req.mem_cube_id else [chat_req.user_id]
                         )
                         start = time.time()
+                        tags, info = self._writeback_meta(chat_req)
                         self._start_add_to_memory(
                             user_id=chat_req.user_id,
                             writable_cube_ids=writable_cube_ids,
@@ -934,6 +956,9 @@ class ChatHandler(BaseHandler):
                             async_mode="async",
                             manager_user_id=chat_req.manager_user_id,
                             project_id=chat_req.project_id,
+                            tags=tags,
+                            info=info,
+                            allow_public=bool(getattr(chat_req, "allow_public", False)),
                         )
                         end = time.time()
                         self.logger.info(
@@ -1232,7 +1257,7 @@ class ChatHandler(BaseHandler):
                 },
                 {"role": "user", "content": further_suggestion_prompt},
             ]
-            response = self.llm.generate(message_list)
+            response = self.suggestion_llm.generate(message_list)
             clean_response = clean_json_response(response)
             response_json = json.loads(clean_response)
             return response_json["query"]
@@ -1319,7 +1344,7 @@ class ChatHandler(BaseHandler):
                 mem_cube_id=mem_cube_id,
                 label=label,
                 content=query,
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
             )
             self.mem_scheduler.submit_messages(messages=[message_item])
             self.logger.info(f"Sent message to scheduler with label: {label}")
@@ -1336,12 +1361,15 @@ class ChatHandler(BaseHandler):
         project_id: str | None = None,
         clean_response: str | None = None,
         async_mode: Literal["async", "sync"] = "sync",
+        tags: list[str] | None = None,
+        info: dict[str, Any] | None = None,
+        allow_public: bool = False,
     ) -> None:
         messages = [
             {
                 "role": "user",
                 "content": query,
-                "chat_time": str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                "chat_time": utc_now_iso(),
             }
         ]
         if clean_response:
@@ -1349,7 +1377,7 @@ class ChatHandler(BaseHandler):
                 {
                     "role": "assistant",
                     "content": clean_response,
-                    "chat_time": str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                    "chat_time": utc_now_iso(),
                 }
             )
         add_req = APIADDRequest(
@@ -1360,6 +1388,13 @@ class ChatHandler(BaseHandler):
             async_mode=async_mode,
             manager_user_id=manager_user_id,
             project_id=project_id,
+            custom_tags=tags,
+            info=info,
+            allow_public=allow_public,
+            # ``_writeback_meta`` keeps the chat agent id in ``info``; mirror it
+            # onto the request so owner views can create the agent's private
+            # memory when MEMOS_AGENT_MEMORY_ENABLED is on.
+            agent_id=(info or {}).get("agent_id"),
         )
 
         self.add_handler.handle_add_memories(add_req)
@@ -1559,6 +1594,19 @@ class ChatHandler(BaseHandler):
             )
             thread.start()
 
+    @staticmethod
+    def _writeback_meta(chat_req: Any) -> tuple[list[str] | None, dict[str, Any] | None]:
+        """Collect the write-back fields exposed by the chat request."""
+        tags = getattr(chat_req, "tags", None)
+        info = dict(getattr(chat_req, "info", None) or {})
+        agent_id = getattr(chat_req, "agent_id", None)
+        app_id = getattr(chat_req, "app_id", None)
+        if agent_id:
+            info.setdefault("agent_id", agent_id)
+        if app_id:
+            info.setdefault("app_id", app_id)
+        return tags, info or None
+
     def _start_add_to_memory(
         self,
         user_id: str,
@@ -1569,9 +1617,12 @@ class ChatHandler(BaseHandler):
         async_mode: Literal["async", "sync"] = "sync",
         manager_user_id: str | None = None,
         project_id: str | None = None,
+        tags: list[str] | None = None,
+        info: dict[str, Any] | None = None,
+        allow_public: bool = False,
     ) -> None:
         self.logger.info(
-            f"Start add to memory for user {user_id}, writable_cube_ids: {writable_cube_ids}, session_id: {session_id}, query: {query}, full_response: {full_response}, async_mode: {async_mode}, manager_user_id: {manager_user_id}, project_id: {project_id}"
+            f"Start add to memory for user {user_id}, writable_cube_ids: {writable_cube_ids}, session_id: {session_id}, query: {query}, full_response: {full_response}, async_mode: {async_mode}, manager_user_id: {manager_user_id}, project_id: {project_id}, tags: {tags}, info: {info}"
         )
 
         def run_async_in_thread():
@@ -1592,6 +1643,9 @@ class ChatHandler(BaseHandler):
                             async_mode=async_mode,
                             manager_user_id=manager_user_id,
                             project_id=project_id,
+                            tags=tags,
+                            info=info,
+                            allow_public=allow_public,
                         )
                     )
                 finally:
@@ -1617,6 +1671,9 @@ class ChatHandler(BaseHandler):
                     async_mode=async_mode,
                     manager_user_id=manager_user_id,
                     project_id=project_id,
+                    tags=tags,
+                    info=info,
+                    allow_public=allow_public,
                 )
             )
             task.add_done_callback(

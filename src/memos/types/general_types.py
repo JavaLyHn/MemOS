@@ -127,6 +127,7 @@ class MOSSearchResult(TypedDict):
     text_mem: list[dict[str, str | list[TextualMemoryItem]]]
     act_mem: list[dict[str, str | list[ActivationMemoryItem]]]
     para_mem: list[dict[str, str | list[ParametricMemoryItem]]]
+    dream_mem: list[dict[str, str | list[TextualMemoryItem]]]
 
 
 # ─── API Types ────────────────────────────────────────────────────────────────────

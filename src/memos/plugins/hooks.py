@@ -43,6 +43,11 @@ def register_hooks(names: list[str], callback: Callable) -> None:
         register_hook(name, callback)
 
 
+def has_hook(name: str) -> bool:
+    """Whether any plugin has registered a callback for ``name``."""
+    return bool(_hooks.get(name))
+
+
 def trigger_hook(name: str, **kwargs: Any) -> Any:
     """Trigger a hook, invoking all registered callbacks in order.
 

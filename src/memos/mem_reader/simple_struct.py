@@ -16,7 +16,10 @@ from memos.configs.mem_reader import SimpleStructMemReaderConfig
 from memos.context.context import ContextThreadPoolExecutor
 from memos.embedders.factory import EmbedderFactory
 from memos.llms.factory import LLMFactory
+from memos.llms.thinking import disable_thinking
 from memos.mem_reader.base import BaseMemReader
+from memos.mem_reader.custom_extract import apply_custom_extract_prompt
+from memos.mem_reader.prompt_config import current_base_extract_prompt
 
 
 if TYPE_CHECKING:
@@ -182,6 +185,13 @@ class SimpleStructMemReader(BaseMemReader, ABC):
                 self.qwen_llm = LLMFactory.from_config(qwen_llm_config)
             except Exception as e:
                 logger.warning(f"[LLM] Qwen initialization failed: {e}")
+        for extraction_llm in (
+            self.llm,
+            self.general_llm,
+            self.preference_extractor_llm,
+            self.qwen_llm,
+        ):
+            disable_thinking(extraction_llm)
         self.embedder = EmbedderFactory.from_config(config.embedder)
         self.chunker = ChunkerFactory.from_config(config.chunker)
         self.save_rawfile = self.chunker.config.save_rawfile
@@ -256,7 +266,9 @@ class SimpleStructMemReader(BaseMemReader, ABC):
 
     def _get_llm_response(self, mem_str: str, custom_tags: list[str] | None) -> dict:
         lang = detect_lang(mem_str)
-        template = PROMPT_DICT["chat"][lang]
+        # A project-level prompt replaces the built-in template for this request;
+        # it keeps the same ``${conversation}`` placeholder contract.
+        template = current_base_extract_prompt() or PROMPT_DICT["chat"][lang]
         examples = PROMPT_DICT["chat"][f"{lang}_example"]
         prompt = template.replace("${conversation}", mem_str)
 
@@ -269,6 +281,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
 
         if self.config.remove_prompt_example:
             prompt = prompt.replace(examples, "")
+        prompt = apply_custom_extract_prompt(prompt, "detail_factual")
         messages = [{"role": "user", "content": prompt}]
 
         response_text = self._safe_generate(messages)
@@ -513,7 +526,6 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         return self._read_memory(
             standard_scene_data, type, info, mode, user_name=user_name, **kwargs
         )
-
 
     def filter_hallucination_in_memories(
         self, messages: list[dict], memory_list: list[TextualMemoryItem]
@@ -853,6 +865,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
                 else ""
             )
             prompt = prompt.replace("{custom_tags_prompt}", custom_tags_prompt)
+            prompt = apply_custom_extract_prompt(prompt, "document", fallback_key="detail_factual")
             message = [{"role": "user", "content": prompt}]
             messages.append(message)
 

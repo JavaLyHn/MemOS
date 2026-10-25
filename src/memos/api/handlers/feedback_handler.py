@@ -40,6 +40,15 @@ class FeedbackHandler(BaseHandler):
         Returns:
             MemoryResponse with formatted results
         """
+        merged_info = dict(feedback_req.info or {})
+        if feedback_req.agent_id:
+            merged_info.setdefault("agent_id", feedback_req.agent_id)
+        if feedback_req.app_id:
+            merged_info.setdefault("app_id", feedback_req.app_id)
+        if feedback_req.allow_public:
+            merged_info.setdefault("allow_public", True)
+        feedback_req.info = merged_info or None
+
         cube_view = self._build_cube_view(feedback_req)
 
         process_record = cube_view.feedback_memories(feedback_req)

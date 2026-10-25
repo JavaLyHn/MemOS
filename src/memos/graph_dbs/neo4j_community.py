@@ -1,4 +1,3 @@
-import json
 import re
 
 from datetime import datetime
@@ -14,6 +13,7 @@ from memos.graph_dbs.neo4j import (
     _sanitize_neo4j_metadata,
 )
 from memos.log import get_logger
+from memos.utils import decode_json_string, utc_now_iso
 from memos.vec_dbs.factory import VecDBFactory
 from memos.vec_dbs.item import VecDBItem
 
@@ -69,10 +69,7 @@ class Neo4jCommunityGraphDB(Neo4jGraphDB):
         metadata.setdefault("delete_time", "")
         metadata.setdefault("delete_record_id", "")
 
-        # serialization
-        if metadata.get("sources"):
-            for idx in range(len(metadata["sources"])):
-                metadata["sources"][idx] = json.dumps(metadata["sources"][idx])
+        # sources 已在 _prepare_node_metadata 里序列化过一次，这里不能再 dump
         # Extract required fields
         embedding = metadata.pop("embedding", None)
 
@@ -118,11 +115,13 @@ class Neo4jCommunityGraphDB(Neo4jGraphDB):
                 metadata=metadata,
             )
 
-    def add_nodes_batch(self, nodes: list[dict[str, Any]], user_name: str | None = None) -> None:
+    def add_nodes_batch(
+        self, nodes: list[dict[str, Any]], user_name: str | None = None
+    ) -> list[str]:
         print("neo4j_community add_nodes_batch:")
         if not nodes:
             logger.warning("[add_nodes_batch] Empty nodes list, skipping")
-            return
+            return []
 
         effective_user_name = user_name if user_name else self.config.user_name
 
@@ -190,7 +189,7 @@ class Neo4jCommunityGraphDB(Neo4jGraphDB):
 
         if not prepared_nodes:
             logger.warning("[add_nodes_batch] No valid nodes to insert after preparation")
-            return
+            return []
 
         try:
             self.vec_db.add(vec_items)
@@ -226,6 +225,7 @@ class Neo4jCommunityGraphDB(Neo4jGraphDB):
         except Exception as e:
             logger.error(f"[add_nodes_batch] Failed to add nodes: {e}", exc_info=True)
             raise
+        return [node["id"] for node in prepared_nodes]
 
     def get_children_with_embeddings(
         self, id: str, user_name: str | None = None
@@ -1045,35 +1045,41 @@ class Neo4jCommunityGraphDB(Neo4jGraphDB):
             f"[delete_node_by_prams] Deleting nodes - memory_ids: {memory_ids}, file_ids: {file_ids}, filter: {filter}"
         )
 
-        # First count matching nodes to get accurate count
-        count_query = f"MATCH (n:Memory) WHERE {ids_where} RETURN count(n) AS node_count"
-        logger.info(f"[delete_node_by_prams] count_query: {count_query}")
-        print(f"[delete_node_by_prams] count_query: {count_query}")
-
-        # Then delete nodes
-        delete_query = f"MATCH (n:Memory) WHERE {ids_where} DETACH DELETE n"
+        # Then delete nodes. Frozen memories are read-only: never delete them,
+        # even through a UUID list or filter (parity with Neo4jGraphDB).
+        delete_query = (
+            f"MATCH (n:Memory) WHERE ({ids_where}) "
+            f"AND (n.status IS NULL OR n.status <> 'frozen') DETACH DELETE n"
+        )
         logger.info(f"[delete_node_by_prams] delete_query: {delete_query}")
         print(f"[delete_node_by_prams] delete_query: {delete_query}")
         print(f"[delete_node_by_prams] params: {params}")
 
         deleted_count = 0
+        deleted_ids: list[str] = []
         try:
             with self.driver.session(database=self.db_name) as session:
-                # Count nodes before deletion
-                count_result = session.run(count_query, **params)
-                count_record = count_result.single()
-                expected_count = 0
-                if count_record:
-                    expected_count = count_record["node_count"] or 0
+                # Collect IDs first so the vector payload copy can be removed too.
+                ids_query = (
+                    f"MATCH (n:Memory) WHERE ({ids_where}) "
+                    f"AND (n.status IS NULL OR n.status <> 'frozen') RETURN n.id AS id"
+                )
+                deleted_ids = [record["id"] for record in session.run(ids_query, **params)]
 
-                # Delete nodes
                 session.run(delete_query, **params)
-                # Use the count from before deletion as the actual deleted count
-                deleted_count = expected_count
+                deleted_count = len(deleted_ids)
 
         except Exception as e:
             logger.error(f"[delete_node_by_prams] Failed to delete nodes: {e}", exc_info=True)
             raise
+
+        if deleted_ids and getattr(self, "vec_db", None) is not None:
+            try:
+                self.vec_db.delete(deleted_ids)
+            except Exception as e:
+                logger.warning(
+                    f"[delete_node_by_prams] Graph deleted but vector cleanup failed: {e}"
+                )
 
         logger.info(f"[delete_node_by_prams] Successfully deleted {deleted_count} nodes")
         return deleted_count
@@ -1168,16 +1174,9 @@ class Neo4jCommunityGraphDB(Neo4jGraphDB):
             if time_field in node and hasattr(node[time_field], "isoformat"):
                 node[time_field] = node[time_field].isoformat()
         node.pop("user_name", None)
-        # serialization
+        # serialization：逐层解到底，历史数据可能被套了多层
         if node.get("sources"):
-            for idx in range(len(node["sources"])):
-                if not (
-                    isinstance(node["sources"][idx], str)
-                    and node["sources"][idx][0] == "{"
-                    and node["sources"][idx][-1] == "}"
-                ):
-                    break
-                node["sources"][idx] = json.loads(node["sources"][idx])
+            node["sources"] = [decode_json_string(item) for item in node["sources"]]
 
         # 还原写入时被 json 序列化的 dict 字段（见 _deserialize_dict_field）
         for _field in _DICT_METADATA_FIELDS:
@@ -1210,16 +1209,9 @@ class Neo4jCommunityGraphDB(Neo4jGraphDB):
                 if time_field in node and hasattr(node[time_field], "isoformat"):
                     node[time_field] = node[time_field].isoformat()
             node.pop("user_name", None)
-            # serialization
+            # serialization：逐层解到底，历史数据可能被套了多层
             if node.get("sources"):
-                for idx in range(len(node["sources"])):
-                    if not (
-                        isinstance(node["sources"][idx], str)
-                        and node["sources"][idx][0] == "{"
-                        and node["sources"][idx][-1] == "}"
-                    ):
-                        break
-                    node["sources"][idx] = json.loads(node["sources"][idx])
+                node["sources"] = [decode_json_string(item) for item in node["sources"]]
 
             # 还原写入时被 json 序列化的 dict 字段（见 _deserialize_dict_field）
             for _field in _DICT_METADATA_FIELDS:
@@ -1364,7 +1356,7 @@ class Neo4jCommunityGraphDB(Neo4jGraphDB):
                     logger.info(f"[delete_node_by_mem_cube_id] Hard deleted {deleted_count} nodes")
                     return deleted_count
                 else:
-                    current_time = datetime.utcnow().isoformat()
+                    current_time = utc_now_iso()
 
                     query = """
                         MATCH (n:Memory)

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from memos.configs.memory import TreeTextMemoryConfig
+from memos.exceptions import MemoryDeleteError
 from memos.memories.textual.item import TextualMemoryItem, TreeNodeTextualMemoryMetadata
 from memos.memories.textual.tree import TreeTextMemory
 
@@ -111,6 +112,49 @@ def test_delete_all(mock_tree_text_memory):
     mock_tree_text_memory.graph_store.clear.assert_called_once()
 
 
+def test_delete_propagates_failures_after_attempting_every_id(mock_tree_text_memory):
+    failing_id = str(uuid.uuid4())
+    succeeding_id = str(uuid.uuid4())
+
+    def _delete_node(mid, user_name=None):
+        if mid == failing_id:
+            raise RuntimeError("db down")
+
+    mock_tree_text_memory.graph_store.delete_node = MagicMock(side_effect=_delete_node)
+
+    with pytest.raises(MemoryDeleteError, match="Failed to delete 1 of 2"):
+        mock_tree_text_memory.delete([failing_id, succeeding_id], user_name="alice")
+
+    # Best effort: every id is attempted, and the failure is not swallowed.
+    assert mock_tree_text_memory.graph_store.delete_node.call_count == 2
+    mock_tree_text_memory.graph_store.delete_node.assert_any_call(succeeding_id, user_name="alice")
+
+
+def test_get_relevant_subgraph_embedding_recall_filters_activated_status(
+    mock_tree_text_memory,
+):
+    mock_tree_text_memory.embedder.embed = MagicMock(return_value=[[0.1] * 5])
+    mock_tree_text_memory.graph_store.search_by_embedding = MagicMock(return_value=[])
+
+    result = mock_tree_text_memory.get_relevant_subgraph("hello", search_type="embedding")
+
+    assert result == {"core_id": None, "nodes": [], "edges": []}
+    kwargs = mock_tree_text_memory.graph_store.search_by_embedding.call_args.kwargs
+    assert kwargs["status"] == "activated"
+
+
+def test_get_relevant_subgraph_fulltext_recall_filters_activated_status(
+    mock_tree_text_memory,
+):
+    mock_tree_text_memory.graph_store.search_by_fulltext = MagicMock(return_value=[])
+
+    result = mock_tree_text_memory.get_relevant_subgraph("hello world", search_type="fulltext")
+
+    assert result == {"core_id": None, "nodes": [], "edges": []}
+    kwargs = mock_tree_text_memory.graph_store.search_by_fulltext.call_args.kwargs
+    assert kwargs["status"] == "activated"
+
+
 def test_load_file_not_exists(mock_tree_text_memory, tmp_path):
     mock_tree_text_memory.config.memory_filename = "memory.json"
     mock_tree_text_memory.graph_store.import_graph = MagicMock()
@@ -166,3 +210,23 @@ def test_add_returns_ids(mock_tree_text_memory):
     mock_tree_text_memory.memory_manager.add.assert_called_once_with(
         mock_items, user_name=None, mode="sync"
     )
+
+
+def test_delete_by_memory_ids_passes_tenant_scope(mock_tree_text_memory):
+    graph_store = MagicMock()
+    mock_tree_text_memory.graph_store = graph_store
+
+    mock_tree_text_memory.delete_by_memory_ids(["m_1"], writable_cube_ids=["cube_a"])
+
+    graph_store.delete_node_by_prams.assert_called_once_with(
+        memory_ids=["m_1"], writable_cube_ids=["cube_a"]
+    )
+
+
+def test_delete_by_memory_ids_does_not_swallow_failures(mock_tree_text_memory):
+    graph_store = MagicMock()
+    graph_store.delete_node_by_prams.side_effect = RuntimeError("graph down")
+    mock_tree_text_memory.graph_store = graph_store
+
+    with pytest.raises(RuntimeError, match="graph down"):
+        mock_tree_text_memory.delete_by_memory_ids(["m_1"], writable_cube_ids=["cube_a"])

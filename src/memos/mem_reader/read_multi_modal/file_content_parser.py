@@ -13,6 +13,7 @@ from memos.context.context import ContextThreadPoolExecutor
 from memos.embedders.base import BaseEmbedder
 from memos.llms.base import BaseLLM
 from memos.log import get_logger
+from memos.mem_reader.custom_extract import apply_custom_extract_prompt
 from memos.mem_reader.read_multi_modal.base import BaseMessageParser, _derive_key
 from memos.mem_reader.read_multi_modal.image_parser import ImageParser
 from memos.mem_reader.read_multi_modal.utils import (
@@ -87,6 +88,7 @@ class FileContentParser(BaseMessageParser):
         # Inject sibling text context into prompt placeholder
         context_text = message_text_context.strip() if message_text_context else ""
         prompt = prompt.replace("{context}", context_text)
+        prompt = apply_custom_extract_prompt(prompt, "document", fallback_key="detail_factual")
 
         messages = [{"role": "user", "content": prompt}]
         try:

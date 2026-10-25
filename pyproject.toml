@@ -4,7 +4,7 @@
 ##############################################################################
 
 name = "MemoryOS"
-version = "2.0.31"
+version = "2.0.33"
 description = "Intelligence Begins with Memory"
 license = {text = "Apache-2.0"}
 readme = "README.md"
@@ -80,7 +80,9 @@ tree-mem = [
 
 # HugeGraph graph backend
 hugegraph = [
-    "hugegraph-python (>=1.5.0,<2.0.0)",  # pyhugegraph client
+    # 1.7.0 replaced 1.5.0's ip/port constructor with a single url; the
+    # backend only targets the url form, so anything older is unusable.
+    "hugegraph-python (>=1.7.0,<2.0.0)",  # pyhugegraph client
     "qdrant-client (>=1.16.0,<2.0.0)",  # default embedding vector store
     "pymilvus (>=2.5.12,<3.0.0)",  # optional Milvus vector store
 ]
@@ -121,6 +123,12 @@ tavily = [
     "tavily-python (>=0.5.0,<1.0.0)",
 ]
 
+# Hybrid retrieval (BM25 lexical recall fused with vector recall)
+hybrid-search = [
+    "rank-bm25 (>=0.2.2,<1.0.0)",  # Pure-python BM25 implementation
+    "jieba (>=0.38.1,<0.42.1)",  # Chinese word segmentation (optional at runtime)
+]
+
 # All optional dependencies
 # Allow users to install with `pip install MemoryOS[all]`
 all = [
@@ -137,7 +145,7 @@ all = [
     "datasketch (>=1.6.5,<2.0.0)",
     "jieba (>=0.38.1,<0.42.1)",
     "rank-bm25 (>=0.2.2)",
-    "hugegraph-python (>=1.5.0,<2.0.0)",
+    "hugegraph-python (>=1.7.0,<2.0.0)",
     # NOT exist in the above optional groups
     # Because they are either huge-size dependencies or infrequently used dependencies.
     # We kindof don't want users to install them.

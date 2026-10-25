@@ -12,6 +12,7 @@ from memos.dream.types import (
     DreamResult,
     TargetMemoryType,
 )
+from memos.utils import normalize_to_utc_iso
 
 
 if TYPE_CHECKING:
@@ -153,7 +154,7 @@ class ConsolidationReasoning:
                 }
             )
 
-        items.sort(key=lambda x: x.get("created_at", ""))
+        items.sort(key=lambda x: normalize_to_utc_iso(x.get("created_at", "")) or "")
         return self._format_memory_block(items) if items else "(none)"
 
     # ------------------------------------------------------------------

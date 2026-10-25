@@ -5,6 +5,7 @@ from abc import ABC
 from memos import log
 from memos.configs.mem_reader import StrategyStructMemReaderConfig
 from memos.configs.parser import ParserConfigFactory
+from memos.mem_reader.custom_extract import apply_custom_extract_prompt
 from memos.mem_reader.read_multi_modal import detect_lang
 from memos.mem_reader.simple_struct import SimpleStructMemReader
 from memos.parsers.factory import ParserFactory
@@ -49,6 +50,7 @@ class StrategyStructMemReader(SimpleStructMemReader, ABC):
             else ""
         )
         prompt = prompt.replace("${custom_tags_prompt}", custom_tags_prompt)
+        prompt = apply_custom_extract_prompt(prompt, "detail_factual")
         messages = [{"role": "user", "content": prompt}]
         try:
             response_text = self.llm.generate(messages)

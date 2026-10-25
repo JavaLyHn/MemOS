@@ -3,7 +3,6 @@ import os
 
 from abc import ABC, abstractmethod
 from concurrent.futures import as_completed
-from datetime import datetime
 from typing import Any
 
 from memos.context.context import ContextThreadPoolExecutor
@@ -15,6 +14,7 @@ from memos.templates.prefer_complete_prompt import (
     NAIVE_JUDGE_UPDATE_OR_ADD_PROMPT_FINE,
     NAIVE_JUDGE_UPDATE_OR_ADD_PROMPT_OP_TRACE,
 )
+from memos.utils import utc_now_iso
 from memos.vec_dbs.item import MilvusVecDBItem
 
 
@@ -243,7 +243,7 @@ class NaiveAdder(BaseAdder):
                 if op["target_id"] in retrieved_mem_db_item_map:
                     update_mem_db_item = retrieved_mem_db_item_map[op["target_id"]]
                     update_mem_db_item.payload["preference"] = op["new_preference"]
-                    update_mem_db_item.payload["updated_at"] = datetime.now().isoformat()
+                    update_mem_db_item.payload["updated_at"] = utc_now_iso()
                     update_mem_db_item.memory = op["new_context_summary"]
                     update_mem_db_item.original_text = op["new_context_summary"]
                     update_mem_db_item.vector = self.embedder.embed([op["new_context_summary"]])[0]

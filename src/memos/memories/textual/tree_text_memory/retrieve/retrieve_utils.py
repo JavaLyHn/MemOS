@@ -462,9 +462,15 @@ class StopwordManager:
 
 
 class FastTokenizer:
-    def __init__(self, use_jieba=True, use_stopwords=True):
+    def __init__(self, use_jieba=True, use_stopwords=True, search_mode=False):
         self.use_jieba = use_jieba
         self.use_stopwords = use_stopwords
+        # 默认保持上游的精确分词; 只有检索侧显式开启搜索模式,避免影响
+        # task_goal_parser / mem_reader 等无关调用方。
+        # 搜索模式会同时产出长词和子词
+        # (“中华人民共和国” -> 中华/人民/共和/共和国/中华人民共和国),
+        # 精确模式只有整词,查询“中华”时 BM25 召回不到。
+        self.search_mode = search_mode
         if self.use_stopwords:
             self.stopword_manager = StopwordManager
 
@@ -493,7 +499,12 @@ class FastTokenizer:
         """split zh jieba"""
         jieba = importlib.import_module("jieba")
 
-        tokens = jieba.lcut(text) if self.use_jieba else list(text)
+        if not self.use_jieba:
+            tokens = list(text)
+        elif self.search_mode:
+            tokens = list(jieba.cut_for_search(text))
+        else:
+            tokens = jieba.lcut(text)
         tokens = [token.strip() for token in tokens if token.strip()]
         if self.use_stopwords:
             return self.stopword_manager.filter_words(tokens)

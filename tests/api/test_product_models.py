@@ -10,7 +10,27 @@ UI would otherwise pick the leading ``str`` branch of the ``anyOf`` and show
 ``"messages": "string"``, which misleads users into sending plain text.
 """
 
-from memos.api.product_models import APIADDRequest
+import pytest
+
+from pydantic import ValidationError
+
+from memos.api.product_models import APIADDRequest, APISearchRequest
+
+
+def test_search_top_k_defaults_to_cloud_cap():
+    """Default recall size follows the cloud contract (9)."""
+    assert APISearchRequest(query="q", user_id="u").top_k == 9
+
+
+def test_search_top_k_rejects_more_than_25():
+    """Cloud caps the mixed recall set at 25 entries."""
+    with pytest.raises(ValidationError):
+        APISearchRequest(query="q", user_id="u", top_k=26)
+
+
+def test_search_top_k_accepts_25():
+    assert APISearchRequest(query="q", user_id="u", top_k=25).top_k == 25
+
 
 
 def test_add_request_exposes_model_level_example():

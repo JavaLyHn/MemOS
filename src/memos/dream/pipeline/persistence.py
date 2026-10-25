@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 
-from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -10,6 +9,7 @@ from memos.dream.embedding import embed_text
 from memos.dream.hook_defs import DreamH
 from memos.dream.types import DreamActionType, TargetMemoryType
 from memos.plugins.hooks import trigger_hook
+from memos.utils import utc_now_iso
 
 
 logger = logging.getLogger(__name__)
@@ -189,7 +189,7 @@ class DreamPersistence:
             "memory_type": action.target_memory_type.value,
             "status": "activated",
             "source": "dream",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": utc_now_iso(),
             **dream_metadata,
             **action.metadata,
             "embedding": embed_text(self.context, action.new_content),
@@ -208,8 +208,8 @@ class DreamPersistence:
             return
 
         fields = {
-            "updated_at": datetime.utcnow().isoformat(),
-            "last_dream_update": datetime.utcnow().isoformat(),
+            "updated_at": utc_now_iso(),
+            "last_dream_update": utc_now_iso(),
             **dream_metadata,
             **action.metadata,
         }
@@ -241,7 +241,7 @@ class DreamPersistence:
             "status": "activated",
             "source": "dream",
             "merged_from": action.source_memory_ids,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": utc_now_iso(),
             **dream_metadata,
             **action.metadata,
             "embedding": embed_text(self.context, action.new_content),
@@ -252,11 +252,11 @@ class DreamPersistence:
             try:
                 graph_db.update_node(
                     src_id,
-                    {"status": "merged", "merged_into": merged_id},
+                    {"status": "archived", "merged_into": merged_id},
                     user_name=cube_id,
                 )
             except Exception:
-                logger.warning("[Dream] could not mark source %s as merged", src_id)
+                logger.warning("[Dream] could not archive merged source %s", src_id)
 
         logger.info("[Dream] merged %d memories → %s", len(action.source_memory_ids), merged_id)
 
@@ -271,7 +271,7 @@ class DreamPersistence:
                 action.target_memory_id,
                 {
                     "status": "archived",
-                    "archived_at": datetime.utcnow().isoformat(),
+                    "archived_at": utc_now_iso(),
                     "archive_reason": action.rationale,
                     **dream_metadata,
                 },
@@ -341,7 +341,7 @@ class DreamPersistence:
             "themes": entry.themes,
             "tags": ["dream", "diary"],
             "created_at": entry.created_at.isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": utc_now_iso(),
             "user_id": user_id,
             "session_id": getattr(signal_snapshot, "session_id", ""),
             "actions_summary": [

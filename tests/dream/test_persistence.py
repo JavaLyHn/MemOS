@@ -12,6 +12,7 @@ from memos.dream.types import (
     TargetMemoryType,
 )
 from memos.graph_dbs.base import BaseGraphDB
+from memos.memories.textual.item import TreeNodeTextualMemoryMetadata
 from memos.vec_dbs.item import VecDBItem
 
 
@@ -309,7 +310,7 @@ def test_archive_action_marks_the_target_memory_archived():
     assert graph.added == []
 
 
-def test_merge_action_marks_every_source_memory_as_merged():
+def test_merge_action_archives_every_source_memory():
     graph = FakeGraphDB()
     persistence = _persistence(graph, FakeEmbedder())
 
@@ -327,9 +328,12 @@ def test_merge_action_marks_every_source_memory_as_merged():
     merged_id = graph.added[0][0]
     assert [node_id for node_id, _fields, _user_name in graph.updated] == ["m1", "m2"]
     for _node_id, fields, user_name in graph.updated:
-        assert fields["status"] == "merged"
+        # "merged" is not a valid node status, so a source node written with it
+        # cannot be parsed back into a TextualMemoryItem.
+        assert fields["status"] == "archived"
         assert fields["merged_into"] == merged_id
         assert user_name == "cube-a"
+        TreeNodeTextualMemoryMetadata(status=fields["status"])
 
 
 def test_actions_without_a_target_id_never_reach_the_graph():

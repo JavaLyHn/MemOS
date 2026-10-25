@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, ClassVar
 
 from memos.configs.vec_db import BaseVecDBConfig
 from memos.vec_dbs.item import VecDBItem
@@ -7,6 +7,13 @@ from memos.vec_dbs.item import VecDBItem
 
 class BaseVecDB(ABC):
     """Base class for all vector databases."""
+
+    #: Whether ``get_all(with_vectors=False)`` is implemented and returns every
+    #: item's payload/text. Lexical indexes (e.g. hybrid BM25) use this to build
+    #: a corpus without pulling embeddings over the wire. Backends that cannot
+    #: honour the flag must leave it False so callers fail fast instead of
+    #: silently indexing an empty corpus.
+    supports_text_snapshot: ClassVar[bool] = False
 
     @abstractmethod
     def __init__(self, config: BaseVecDBConfig):
@@ -60,20 +67,26 @@ class BaseVecDB(ABC):
         """Get multiple items by their IDs."""
 
     @abstractmethod
-    def get_by_filter(self, filter: dict[str, Any]) -> list[VecDBItem]:
+    def get_by_filter(self, filter: dict[str, Any], with_vectors: bool = True) -> list[VecDBItem]:
         """
         Retrieve all items that match the given filter criteria.
 
         Args:
             filter: Payload filters to match against stored items
+            with_vectors: When False, omit embeddings from the result. Backends
+                advertising ``supports_text_snapshot`` must honour it.
 
         Returns:
             List of items including vectors and payloads that match the filter
         """
 
     @abstractmethod
-    def get_all(self) -> list[VecDBItem]:
-        """Retrieve all items in the vector database."""
+    def get_all(self, with_vectors: bool = True) -> list[VecDBItem]:
+        """Retrieve all items in the vector database.
+
+        Args:
+            with_vectors: When False, omit embeddings from the result.
+        """
 
     @abstractmethod
     def count(self, filter: dict[str, Any] | None = None) -> int:

@@ -18,8 +18,30 @@ __all__ = [
     "format_memory_item",
     "post_process_textual_mem",
     "rerank_knowledge_mem",
+    "strip_memory_sources",
     "to_iter",
 ]
+
+
+def strip_memory_sources(payload: Any) -> None:
+    """Remove ``metadata.sources`` from a response payload in place.
+
+    ``sources`` keeps the full conversation that produced a memory and can reach
+    hundreds of megabytes for one preference node. No current consumer reads it
+    (the console only uses the memory body), so responses omit it unless the
+    request explicitly asks for it with ``include_sources``.
+    """
+    if isinstance(payload, dict):
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            metadata.pop("sources", None)
+        for key, value in payload.items():
+            if key in ("metadata", "embedding"):
+                continue
+            strip_memory_sources(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            strip_memory_sources(item)
 
 
 def to_iter(running: Any) -> list[Any]:
@@ -56,7 +78,9 @@ def format_memory_item(
     Returns:
         Formatted memory dictionary with ref_id and metadata
     """
-    memory = memory_data.model_dump()
+    # ``sources`` can be hundreds of megabytes for one node; skip copying it
+    # rather than serialising it only to drop it again.
+    memory = memory_data.model_dump(exclude=None if save_sources else {"metadata": {"sources"}})
     memory_id = memory["id"]
     ref_id = f"[{memory_id.split('-')[0]}]"
 
@@ -102,6 +126,18 @@ def post_process_textual_mem(
         mem for mem in text_formatted_mem if mem["metadata"]["memory_type"] == "PreferenceMemory"
     ]
 
+    # Extract event memories (cloud `event` view)
+    event_mem = [
+        mem for mem in text_formatted_mem if mem["metadata"]["memory_type"] == "EventMemory"
+    ]
+
+    # Extract cross-case synthesis memories (daily digest + derived insights)
+    dream_mem = [
+        mem
+        for mem in text_formatted_mem
+        if mem["metadata"]["memory_type"] in ["DreamDiary", "InsightMemory"]
+    ]
+
     memories_result["text_mem"].append(
         {
             "cube_id": mem_cube_id,
@@ -135,6 +171,22 @@ def post_process_textual_mem(
         pref_instruction, pref_note = instruct_completion(pref_mem)
         memories_result["pref_string"] = pref_instruction
         memories_result["pref_note"] = pref_note
+
+    memories_result["dream_mem"].append(
+        {
+            "cube_id": mem_cube_id,
+            "memories": dream_mem,
+            "total_nodes": len(dream_mem),
+        }
+    )
+
+    memories_result.setdefault("event_mem", []).append(
+        {
+            "cube_id": mem_cube_id,
+            "memories": event_mem,
+            "total_nodes": len(event_mem),
+        }
+    )
 
     return memories_result
 

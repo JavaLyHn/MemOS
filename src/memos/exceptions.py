@@ -15,4 +15,24 @@ class ConfigurationError(MemOSError): ...
 class MemCubeError(MemOSError): ...
 
 
+class LLMError(MemOSError): ...
+
+
+class LLMRateLimitError(LLMError):
+    """Local admission failed; do not bypass it through model retries or fallback."""
+
+
+class LLMRateLimitTimeoutError(LLMRateLimitError): ...
+
+
+class LLMRateLimitQueueFullError(LLMRateLimitError): ...
+
+
+class LLMRateLimitUnavailableError(LLMRateLimitError): ...
+
+
 class EmbedderError(MemOSError): ...
+
+
+class MemoryDeleteError(MemOSError):
+    """One or more memories could not be deleted; the remaining ids were attempted."""

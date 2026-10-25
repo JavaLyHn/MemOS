@@ -9,8 +9,14 @@ from typing import TYPE_CHECKING, Any
 
 from memos.context.context import ContextThreadPoolExecutor
 from memos.log import get_logger
+from memos.mem_reader.custom_extract import apply_custom_extract_prompt
 from memos.mem_reader.read_multi_modal import detect_lang
-from memos.memories.textual.item import TextualMemoryItem, TreeNodeTextualMemoryMetadata
+from memos.mem_reader.source_filter import MemorySourceFilter
+from memos.memories.textual.item import (
+    SourceMessage,
+    TextualMemoryItem,
+    TreeNodeTextualMemoryMetadata,
+)
 from memos.templates.prefer_complete_prompt import (
     NAIVE_EXPLICIT_PREFERENCE_EXTRACT_PROMPT,
     NAIVE_EXPLICIT_PREFERENCE_EXTRACT_PROMPT_ZH,
@@ -33,7 +39,7 @@ def _extract_explicit_preference(qa_pair_str: str, llm) -> list[dict[str, Any]] 
         "zh": NAIVE_EXPLICIT_PREFERENCE_EXTRACT_PROMPT_ZH,
         "en": NAIVE_EXPLICIT_PREFERENCE_EXTRACT_PROMPT,
     }
-    prompt = _map[lang].replace("{qa_pair}", qa_pair_str)
+    prompt = apply_custom_extract_prompt(_map[lang].replace("{qa_pair}", qa_pair_str), "preference")
 
     try:
         response = llm.generate([{"role": "user", "content": prompt}])
@@ -62,7 +68,7 @@ def _extract_implicit_preference(qa_pair_str: str, llm) -> list[dict[str, Any]] 
         "zh": NAIVE_IMPLICIT_PREFERENCE_EXTRACT_PROMPT_ZH,
         "en": NAIVE_IMPLICIT_PREFERENCE_EXTRACT_PROMPT,
     }
-    prompt = _map[lang].replace("{qa_pair}", qa_pair_str)
+    prompt = apply_custom_extract_prompt(_map[lang].replace("{qa_pair}", qa_pair_str), "preference")
 
     try:
         response = llm.generate([{"role": "user", "content": prompt}])
@@ -100,6 +106,7 @@ def _create_preference_memory_item(
     fast_item: TextualMemoryItem | None,
     info: dict[str, Any],
     embedder,
+    sources_override: list[SourceMessage] | None = None,
     **kwargs,
 ) -> TextualMemoryItem:
     """
@@ -133,7 +140,13 @@ def _create_preference_memory_item(
     embedding = embedder.embed([context_summary])[0] if embedder and context_summary else None
 
     # Extract sources from fast_item
-    sources = getattr(fast_item.metadata, "sources", []) if fast_item else []
+    sources = (
+        sources_override
+        if sources_override is not None
+        else getattr(fast_item.metadata, "sources", [])
+        if fast_item
+        else []
+    )
 
     # Create metadata
     metadata = TreeNodeTextualMemoryMetadata(
@@ -168,6 +181,7 @@ def _process_single_chunk_explicit(
     info: dict[str, Any],
     llm,
     embedder,
+    sources_override: list[SourceMessage] | None = None,
     **kwargs,
 ) -> list[TextualMemoryItem]:
     """Process a single chunk for explicit preferences."""
@@ -190,6 +204,7 @@ def _process_single_chunk_explicit(
             fast_item=fast_item,
             info=info,
             embedder=embedder,
+            sources_override=sources_override,
             **kwargs,
         )
         memories.append(memory)
@@ -203,6 +218,7 @@ def _process_single_chunk_implicit(
     info: dict[str, Any],
     llm,
     embedder,
+    sources_override: list[SourceMessage] | None = None,
     **kwargs,
 ) -> list[TextualMemoryItem]:
     """Process a single chunk for implicit preferences."""
@@ -225,6 +241,7 @@ def _process_single_chunk_implicit(
             fast_item=fast_item,
             info=info,
             embedder=embedder,
+            sources_override=sources_override,
             **kwargs,
         )
         memories.append(memory)
@@ -260,13 +277,20 @@ def process_preference_fine(
         return []
 
     try:
-        # Convert fast_memory_items to messages format
+        # Convert fast_memory_items to source-filtered messages format
+        source_filter = MemorySourceFilter()
         chunks = []
         for fast_item in fast_memory_items:
-            mem_str = fast_item.memory or ""
+            raw_sources = getattr(fast_item.metadata, "sources", None)
+            if raw_sources:
+                filtered_sources = source_filter.filter_for_preference(raw_sources)
+                mem_str = source_filter.sources_to_prompt_text(filtered_sources)
+            else:
+                filtered_sources = None
+                mem_str = fast_item.memory or ""
             if not mem_str.strip():
                 continue
-            chunks.append((mem_str, fast_item))
+            chunks.append((mem_str, fast_item, filtered_sources))
 
         if not chunks:
             return []
@@ -277,16 +301,30 @@ def process_preference_fine(
             futures = {}
 
             # Submit explicit extraction tasks
-            for chunk, fast_item in chunks:
+            for chunk, fast_item, filtered_sources in chunks:
                 future = executor.submit(
-                    _process_single_chunk_explicit, chunk, fast_item, info, llm, embedder, **kwargs
+                    _process_single_chunk_explicit,
+                    chunk,
+                    fast_item,
+                    info,
+                    llm,
+                    embedder,
+                    filtered_sources,
+                    **kwargs,
                 )
                 futures[future] = ("explicit_preference", chunk)
 
             # Submit implicit extraction tasks
-            for chunk, fast_item in chunks:
+            for chunk, fast_item, filtered_sources in chunks:
                 future = executor.submit(
-                    _process_single_chunk_implicit, chunk, fast_item, info, llm, embedder, **kwargs
+                    _process_single_chunk_implicit,
+                    chunk,
+                    fast_item,
+                    info,
+                    llm,
+                    embedder,
+                    filtered_sources,
+                    **kwargs,
                 )
                 futures[future] = ("implicit_preference", chunk)
 

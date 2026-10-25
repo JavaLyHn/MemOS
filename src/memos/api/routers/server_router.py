@@ -15,19 +15,33 @@ import os
 import random as _random
 import socket
 
-from fastapi import APIRouter, HTTPException, Query
+from urllib.parse import quote
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response
 
 from memos.api import handlers
+from memos.api.cloud_routes import router as cloud_router
+from memos.api.cloud_store import build_metadata_store
+from memos.api.contract import contract_document
+from memos.api.handlers import cloud_handler
 from memos.api.handlers.add_handler import AddHandler
 from memos.api.handlers.base_handler import HandlerDependencies
 from memos.api.handlers.chat_handler import ChatHandler
 from memos.api.handlers.cube_handler import CubeHandler
 from memos.api.handlers.feedback_handler import FeedbackHandler
+from memos.api.handlers.formatters_handler import strip_memory_sources
+from memos.api.handlers.prompt_handler import PromptHandler, model_list
 from memos.api.handlers.search_handler import SearchHandler
+from memos.api.knowledge_base import KnowledgeBaseService
+from memos.api.message_store import build_message_store
 from memos.api.product_models import (
+    AddStatusRequestV2,
+    AddStatusResponseV2,
     AllStatusResponse,
     APIADDRequest,
     APIChatCompleteRequest,
+    APIExtractRequest,
     APIFeedbackRequest,
     APISearchRequest,
     ChatBusinessRequest,
@@ -35,32 +49,70 @@ from memos.api.product_models import (
     ChatRequest,
     CreateCubeRequest,
     CreateCubeResponse,
+    DebugExtractRequest,
     DeleteMemoryByRecordIdRequest,
     DeleteMemoryByRecordIdResponse,
     DeleteMemoryRequest,
     DeleteMemoryResponse,
     ExistMemCubeIdRequest,
     ExistMemCubeIdResponse,
+    ExtractDebugResponse,
+    ExtractPromptRequest,
+    ExtractPromptResponse,
+    GenerateExtractPromptRequest,
+    GetEventMemoriesRequest,
+    GetEventMemoriesResponse,
+    GetMemoryByIdsRequest,
     GetMemoryDashboardRequest,
+    GetMemoryGraphRequest,
+    GetMemoryGraphResponse,
     GetMemoryPlaygroundRequest,
     GetMemoryRequest,
     GetMemoryResponse,
+    GetMessageRequest,
+    GetMessageResponse,
     GetUserNamesByMemoryIdsRequest,
     GetUserNamesByMemoryIdsResponse,
+    KnowledgeBaseCreateRequest,
+    KnowledgeBaseDeleteRequest,
+    KnowledgeBaseFileAddRequest,
+    KnowledgeBaseFileDeleteRequest,
+    KnowledgeBaseFileDownloadRequest,
+    KnowledgeBaseFileListRequest,
+    KnowledgeBaseListRequest,
+    KnowledgeBaseUpdateRequest,
     MemoryResponse,
+    ModelListResponse,
+    ProfileBindRequest,
+    ProfileDeleteRequest,
+    ProfileEditRequest,
+    ProfileQueryRequest,
+    ProfileTemplateCreateRequest,
+    ProfileTemplateDeleteRequest,
+    ProfileTemplateQueryRequest,
+    ProfileTemplateUpdateRequest,
+    PromptResponse,
     RecoverMemoryByRecordIdRequest,
     RecoverMemoryByRecordIdResponse,
     RegisterCubeRequest,
     RegisterCubeResponse,
+    RerankRequest,
+    RerankResponse,
+    SaveExtractPromptRequest,
     SearchResponse,
     StatusResponse,
     SuggestionRequest,
     SuggestionResponse,
     TaskQueueResponse,
+    UpdateMemoryRequest,
+    UpdateMemoryResponse,
 )
+from memos.api.profile import ProfileService
+from memos.api.skill_sink import SkillMemorySink
 from memos.log import get_logger
 from memos.mem_scheduler.base_scheduler import BaseScheduler
 from memos.mem_scheduler.utils.status_tracker import TaskStatusTracker
+from memos.time_basis import normalize_payload_times
 
 
 logger = get_logger(__name__)
@@ -93,19 +145,92 @@ chat_handler = (
 )
 feedback_handler = FeedbackHandler(dependencies)
 cube_handler = CubeHandler(dependencies)
+prompt_handler = PromptHandler(dependencies)
 # Extract commonly used components for function-based handlers
 # (These can be accessed from the components dict without unpacking all of them)
 mem_scheduler: BaseScheduler = components["mem_scheduler"]
 llm = components["llm"]
+suggestion_llm = components.get("suggestion_llm", llm)
 naive_mem_cube = components["naive_mem_cube"]
 redis_client = components["redis_client"]
 status_tracker = TaskStatusTracker(redis_client=redis_client)
 graph_db = components["graph_db"]
 
+# Cloud-parity services are built lazily: router import happens under patched
+# test fixtures and must not touch the filesystem or the driver.
+_cloud_store = None
+
+
+def get_cloud_store():
+    global _cloud_store
+    if _cloud_store is None:
+        _cloud_store = build_metadata_store(graph_db)
+    return _cloud_store
+
+
+_message_store = None
+
+
+def get_message_store():
+    global _message_store
+    if _message_store is None:
+        _message_store = build_message_store(graph_db)
+    return _message_store
+
+
+def get_skill_sink() -> SkillMemorySink | None:
+    text_mem = getattr(naive_mem_cube, "text_mem", None)
+    if text_mem is None:
+        return None
+    reader = components.get("mem_reader")
+    return SkillMemorySink(
+        text_mem,
+        components.get("embedder"),
+        getattr(reader, "skills_dir_config", None),
+        getattr(reader, "oss_config", None),
+    )
+
+
+def get_kb_service() -> KnowledgeBaseService:
+    return KnowledgeBaseService.from_env(get_cloud_store(), skill_sink=get_skill_sink())
+
+
+def get_profile_service() -> ProfileService:
+    return ProfileService(get_cloud_store())
+
+
+# =============================================================================
+# Contract
+# =============================================================================
+
+
+@router.get("/contract", summary="Describe the wire contract")
+def get_contract():
+    """Machine-readable contract for consumers (console, MCP gateway).
+
+    Consumers check ``contract_version`` before taking traffic instead of
+    hard-coding the quirks of one deployment.
+    """
+    return contract_document()
+
 
 # =============================================================================
 # Search API Endpoints
 # =============================================================================
+
+
+def _shape_response(resp, include_sources: bool):
+    """Apply the response contract.
+
+    * every timestamp is real UTC (see ``memos.time_basis``);
+    * ``metadata.sources`` is dropped unless the caller asked for it - it can be
+      hundreds of megabytes for a single preference node and no console
+      consumer reads it.
+    """
+    normalize_payload_times(resp.data)
+    if not include_sources:
+        strip_memory_sources(resp.data)
+    return resp
 
 
 @router.post("/search", summary="Search memories", response_model=SearchResponse)
@@ -116,7 +241,7 @@ def search_memories(search_req: APISearchRequest):
     This endpoint uses the class-based SearchHandler for better code organization.
     """
     search_results = search_handler.handle_search_memories(search_req)
-    return search_results
+    return _shape_response(search_results, search_req.include_sources)
 
 
 # =============================================================================
@@ -132,6 +257,20 @@ def add_memories(add_req: APIADDRequest):
     This endpoint uses the class-based AddHandler for better code organization.
     """
     return add_handler.handle_add_memories(add_req)
+
+
+@router.post(
+    "/extract_memory",
+    summary="Extract memories without persisting (dry run)",
+    response_model=MemoryResponse,
+)
+def extract_memories(extract_req: APIExtractRequest):
+    """Return what the reader would extract from the messages, without writing.
+
+    Mirrors the cloud ``extract/memory`` contract: facts/preferences only, no
+    graph or vector-store writes, no scheduler task.
+    """
+    return add_handler.handle_extract_memories(extract_req)
 
 
 # =============================================================================
@@ -160,6 +299,65 @@ async def create_cube(request: CreateCubeRequest) -> CreateCubeResponse:
     - **writable_cube_ids**: List of cube IDs the user can write to (used in add/chat)
     """
     return await cube_handler.create_cube(request)
+
+
+@router.post(
+    "/get_extract_prompt",
+    summary="Read a project's extract prompt",
+    response_model=ExtractPromptResponse,
+)
+async def get_extract_prompt(request: ExtractPromptRequest) -> ExtractPromptResponse:
+    """Return the prompt saved for ``mem_cube_id``, or the built-in default."""
+    return prompt_handler.get_prompt(request)
+
+
+@router.post(
+    "/save_extract_prompt",
+    summary="Save a project's extract prompt",
+    response_model=PromptResponse,
+)
+async def save_extract_prompt(request: SaveExtractPromptRequest) -> PromptResponse:
+    """Persist the full extraction prompt for one project.
+
+    The prompt must keep the ``${conversation}`` placeholder.
+    """
+    return prompt_handler.save(request)
+
+
+@router.post(
+    "/reset_extract_prompt",
+    summary="Reset a project's extract prompt",
+    response_model=PromptResponse,
+)
+async def reset_extract_prompt(request: ExtractPromptRequest) -> PromptResponse:
+    """Delete the saved prompt and return the built-in default."""
+    return prompt_handler.reset(request)
+
+
+@router.post(
+    "/generate_extract_prompt",
+    summary="Rewrite a project's extract prompt from an instruction",
+    response_model=PromptResponse,
+)
+async def generate_extract_prompt(request: GenerateExtractPromptRequest) -> PromptResponse:
+    """Ask the configured chat model to rewrite the prompt. Not persisted."""
+    return prompt_handler.generate(request)
+
+
+@router.post(
+    "/debug_extract",
+    summary="Run extraction once with a project's prompt",
+    response_model=ExtractDebugResponse,
+)
+async def debug_extract(request: DebugExtractRequest) -> ExtractDebugResponse:
+    """Dry run: no memory or graph writes."""
+    return prompt_handler.debug_extract(request)
+
+
+@router.get("/models", summary="List models in use", response_model=ModelListResponse)
+def list_models() -> ModelListResponse:
+    """Models actually configured in this process, read from the environment."""
+    return model_list()
 
 
 @router.post(
@@ -327,7 +525,7 @@ def get_suggestion_queries(suggestion_req: SuggestionRequest):
         user_id=suggestion_req.mem_cube_id,
         language=suggestion_req.language,
         message=suggestion_req.message,
-        llm=llm,
+        llm=suggestion_llm,
         naive_mem_cube=naive_mem_cube,
     )
 
@@ -346,7 +544,7 @@ def get_all_memories(memory_req: GetMemoryPlaygroundRequest):
     Otherwise, returns all memories of the specified type.
     """
     if memory_req.search_query:
-        return handlers.memory_handler.handle_get_subgraph(
+        resp = handlers.memory_handler.handle_get_subgraph(
             user_id=memory_req.user_id,
             mem_cube_id=(
                 memory_req.mem_cube_ids[0] if memory_req.mem_cube_ids else memory_req.user_id
@@ -356,39 +554,97 @@ def get_all_memories(memory_req: GetMemoryPlaygroundRequest):
             naive_mem_cube=naive_mem_cube,
             search_type=memory_req.search_type,
         )
-    else:
-        return handlers.memory_handler.handle_get_all_memories(
-            user_id=memory_req.user_id,
-            mem_cube_id=(
-                memory_req.mem_cube_ids[0] if memory_req.mem_cube_ids else memory_req.user_id
-            ),
-            memory_type=memory_req.memory_type or "text_mem",
-            naive_mem_cube=naive_mem_cube,
-        )
+        return _shape_response(resp, False)
+    resp = handlers.memory_handler.handle_get_all_memories(
+        user_id=memory_req.user_id,
+        mem_cube_id=(memory_req.mem_cube_ids[0] if memory_req.mem_cube_ids else memory_req.user_id),
+        memory_type=memory_req.memory_type or "text_mem",
+        naive_mem_cube=naive_mem_cube,
+    )
+    return _shape_response(resp, False)
+
+
+@router.post(
+    "/get_memory_graph",
+    summary="Get the dashboard memory graph",
+    response_model=GetMemoryGraphResponse,
+)
+def get_memory_graph(memory_req: GetMemoryGraphRequest):
+    """Return tenant-scoped nodes plus PARENT/MERGED_TO edges for the graph view."""
+    resp = handlers.memory_handler.handle_get_memory_graph(
+        get_graph_req=memory_req,
+        naive_mem_cube=naive_mem_cube,
+    )
+    return _shape_response(resp, False)
+
+
+@router.post(
+    "/get_event_memories",
+    summary="Get event and Dream memories",
+    response_model=GetEventMemoriesResponse,
+)
+def get_event_memories(memory_req: GetEventMemoriesRequest):
+    """Return paginated EventMemory / Context / InsightMemory / DreamDiary nodes."""
+    resp = handlers.memory_handler.handle_get_event_memories(
+        get_event_req=memory_req,
+        naive_mem_cube=naive_mem_cube,
+    )
+    return _shape_response(resp, False)
 
 
 @router.post("/get_memory", summary="Get memories for user", response_model=GetMemoryResponse)
 def get_memories(memory_req: GetMemoryRequest):
-    return handlers.memory_handler.handle_get_memories(
+    resp = handlers.memory_handler.handle_get_memories(
         get_mem_req=memory_req,
         naive_mem_cube=naive_mem_cube,
     )
+    return _shape_response(resp, memory_req.include_sources)
 
 
 @router.get("/get_memory/{memory_id}", summary="Get memory by id", response_model=GetMemoryResponse)
-def get_memory_by_id(memory_id: str):
-    return handlers.memory_handler.handle_get_memory(
+def get_memory_by_id(
+    memory_id: str,
+    mem_cube_id: str | None = Query(
+        None,
+        description="Only return the memory when it belongs to this cube/tenant. "
+        "Omitted: look the id up across tenants (owner lookup). "
+        "Ignored in multi-database mode, where tenants are isolated physically.",
+    ),
+    include_sources: bool = Query(
+        False,
+        description="Include metadata.sources (the full conversation behind the memory).",
+    ),
+):
+    resp = handlers.memory_handler.handle_get_memory(
         memory_id=memory_id,
         naive_mem_cube=naive_mem_cube,
+        mem_cube_id=mem_cube_id,
     )
+    return _shape_response(resp, include_sources)
 
 
 @router.post("/get_memory_by_ids", summary="Get memory by ids", response_model=GetMemoryResponse)
-def get_memory_by_ids(memory_ids: list[str]):
-    return handlers.memory_handler.handle_get_memory_by_ids(
+def get_memory_by_ids(
+    payload: GetMemoryByIdsRequest | list[str],
+    mem_cube_id: str | None = Query(
+        None,
+        description="Only return memories that belong to this cube/tenant. "
+        "Omitted: the service's configured default tenant. "
+        "Ignored in multi-database mode, where tenants are isolated physically.",
+    ),
+):
+    # Contract v2 is the object shape; the bare array is accepted for callers
+    # that have not migrated yet.
+    memory_ids = payload.memory_ids if isinstance(payload, GetMemoryByIdsRequest) else payload
+    include_sources = (
+        payload.include_sources if isinstance(payload, GetMemoryByIdsRequest) else False
+    )
+    resp = handlers.memory_handler.handle_get_memory_by_ids(
         memory_ids=memory_ids,
         naive_mem_cube=naive_mem_cube,
+        mem_cube_id=mem_cube_id,
     )
+    return _shape_response(resp, include_sources)
 
 
 @router.post(
@@ -396,7 +652,9 @@ def get_memory_by_ids(memory_ids: list[str]):
 )
 def delete_memories(memory_req: DeleteMemoryRequest):
     return handlers.memory_handler.handle_delete_memories(
-        delete_mem_req=memory_req, naive_mem_cube=naive_mem_cube
+        delete_mem_req=memory_req,
+        naive_mem_cube=naive_mem_cube,
+        message_store=get_message_store(),
     )
 
 
@@ -504,7 +762,185 @@ def recover_memory_by_record_id(memory_req: RecoverMemoryByRecordIdRequest):
     "/get_memory_dashboard", summary="Get memories for dashboard", response_model=GetMemoryResponse
 )
 def get_memories_dashboard(memory_req: GetMemoryDashboardRequest):
-    return handlers.memory_handler.handle_get_memories_dashboard(
+    resp = handlers.memory_handler.handle_get_memories_dashboard(
         get_mem_req=memory_req,
         naive_mem_cube=naive_mem_cube,
     )
+    return _shape_response(resp, memory_req.include_sources)
+
+
+# =============================================================================
+# Cloud parity endpoints (T2/T3)
+# =============================================================================
+
+
+@router.post("/update_memory", summary="Update one memory", response_model=UpdateMemoryResponse)
+def update_memory(update_req: UpdateMemoryRequest):
+    """Rewrite content/title/status of a memory.
+
+    Content updates recompute the embedding and update both the graph node and
+    the vector payload; frozen/expired lifecycle rules are enforced here.
+    """
+    return cloud_handler.handle_update_memory(
+        update_req,
+        naive_mem_cube=naive_mem_cube,
+        embedder=components.get("embedder"),
+    )
+
+
+@router.post("/add_status", summary="Get async add task status", response_model=AddStatusResponseV2)
+def add_status(status_req: AddStatusRequestV2):
+    """Return the task status plus the `memory_views` summary."""
+    return cloud_handler.handle_add_status(
+        status_req,
+        status_tracker=status_tracker,
+        naive_mem_cube=naive_mem_cube,
+    )
+
+
+@router.post(
+    "/get_message", summary="Get raw conversation messages", response_model=GetMessageResponse
+)
+def get_message(message_req: GetMessageRequest):
+    """Return the stored messages of one conversation (cloud ``get/message``)."""
+    return cloud_handler.handle_get_message(message_req, get_message_store())
+
+
+@router.post("/rerank", summary="Rerank documents against a query", response_model=RerankResponse)
+def rerank(rerank_req: RerankRequest):
+    """Score arbitrary documents with the configured reranker (cloud ``rerank``)."""
+    return cloud_handler.handle_rerank(rerank_req, components.get("reranker"))
+
+
+# ── knowledge base ───────────────────────────────────────────────────────────
+
+
+@router.post("/create_knowledgebase", summary="Create a knowledge base")
+def create_knowledgebase(req: KnowledgeBaseCreateRequest):
+    return cloud_handler.handle_kb_create(req, get_kb_service())
+
+
+@router.post("/delete_knowledgebase", summary="Delete a knowledge base")
+def delete_knowledgebase(req: KnowledgeBaseDeleteRequest):
+    return cloud_handler.handle_kb_delete(req, get_kb_service())
+
+
+@router.post("/update_knowledgebase", summary="Rename a knowledge base or update its description")
+def update_knowledgebase(req: KnowledgeBaseUpdateRequest):
+    return cloud_handler.handle_kb_update(req, get_kb_service())
+
+
+@router.post("/get_knowledgebase", summary="List or get knowledge bases")
+def get_knowledgebase(req: KnowledgeBaseListRequest):
+    return cloud_handler.handle_kb_list(req, get_kb_service())
+
+
+@router.post("/add_knowledgebase_file", summary="Add knowledge base files")
+async def add_knowledgebase_file(request: Request):
+    """Accept cloud's JSON `file` list or a multipart upload (`file` parts)."""
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        payload = {
+            "user_id": form.get("user_id"),
+            "mem_cube_id": form.get("mem_cube_id"),
+            "knowledgebase_id": form.get("knowledgebase_id"),
+            "type": form.get("type"),
+        }
+        uploads = []
+        for upload in form.getlist("file"):
+            filename = getattr(upload, "filename", None)
+            if not filename:
+                continue
+            uploads.append(
+                {
+                    "name": filename,
+                    "bytes": await upload.read(),
+                    "content_type": getattr(upload, "content_type", None),
+                }
+            )
+        req = KnowledgeBaseFileAddRequest(**payload)
+        return cloud_handler.handle_kb_file_add(req, get_kb_service(), uploads=uploads)
+
+    body = await request.json()
+    req = KnowledgeBaseFileAddRequest(**body)
+    return cloud_handler.handle_kb_file_add(req, get_kb_service())
+
+
+@router.post("/delete_knowledgebase_file", summary="Delete knowledge base files")
+def delete_knowledgebase_file(req: KnowledgeBaseFileDeleteRequest):
+    return cloud_handler.handle_kb_file_delete(req, get_kb_service())
+
+
+@router.post("/get_knowledgebase_file", summary="List or get knowledge base files")
+def get_knowledgebase_file(req: KnowledgeBaseFileListRequest):
+    return cloud_handler.handle_kb_file_list(req, get_kb_service())
+
+
+@router.post("/download_knowledgebase_file", summary="Download a knowledge base file")
+def download_knowledgebase_file(req: KnowledgeBaseFileDownloadRequest):
+    content, filename = cloud_handler.handle_kb_file_download(req, get_kb_service())
+    safe_name = filename.replace('"', "").replace("\n", "").replace("\r", "")
+    fallback = safe_name if safe_name.isascii() and safe_name else "download"
+    encoded = quote(safe_name, safe="")
+    disposition = f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": disposition},
+    )
+
+
+# ── profile ──────────────────────────────────────────────────────────────────
+
+
+@router.post("/add_profile_template", summary="Create a profile template")
+def add_profile_template(req: ProfileTemplateCreateRequest):
+    return cloud_handler.handle_profile_template_create(req, get_profile_service())
+
+
+@router.post("/list_profile_template", summary="List profile templates")
+def list_profile_template(req: ProfileTemplateQueryRequest):
+    return cloud_handler.handle_profile_template_list(req, get_profile_service())
+
+
+@router.post("/get_profile_template", summary="Get a profile template")
+def get_profile_template(req: ProfileTemplateQueryRequest):
+    if not req.profile_template_id:
+        raise ValueError("profile_template_id is required")
+    return cloud_handler.handle_profile_template_list(req, get_profile_service())
+
+
+@router.post("/update_profile_template", summary="Update a profile template")
+def update_profile_template(req: ProfileTemplateUpdateRequest):
+    return cloud_handler.handle_profile_template_update(req, get_profile_service())
+
+
+@router.post("/delete_profile_template", summary="Delete a profile template")
+def delete_profile_template(req: ProfileTemplateDeleteRequest):
+    return cloud_handler.handle_profile_template_delete(req, get_profile_service())
+
+
+@router.post("/bind_profile_template", summary="Bind subjects to profile templates")
+def bind_profile_template(req: ProfileBindRequest):
+    return cloud_handler.handle_profile_bind(req, get_profile_service())
+
+
+@router.post("/edit_profile", summary="Edit a profile instance")
+def edit_profile(req: ProfileEditRequest):
+    return cloud_handler.handle_profile_edit(req, get_profile_service())
+
+
+@router.post("/delete_profile", summary="Delete a profile instance")
+def delete_profile(req: ProfileDeleteRequest):
+    return cloud_handler.handle_profile_delete(req, get_profile_service())
+
+
+@router.post("/get_profile", summary="Get profile instances of a subject")
+def get_profile(req: ProfileQueryRequest):
+    return cloud_handler.handle_profile_query(req, get_profile_service())
+
+
+# Cloud-contract facade: cloud paths at the root, so they are not added under /product.
+# `include_router` would prepend this router's `/product` prefix, hence the direct extend.
+router.routes.extend(cloud_router.routes)

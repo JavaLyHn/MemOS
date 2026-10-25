@@ -14,6 +14,7 @@ All HugeGraph / pyhugegraph I/O is mocked — no live server required.
 
 import uuid
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from memos.graph_dbs.base import BaseGraphDB
@@ -197,20 +198,96 @@ def test_full_hybrid_retrieve_deduplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_get_subgraph_called_on_hugegraph():
-    hg = _make_hugegraph_mock()
-    center_id = str(uuid.uuid4())
-    neighbor_id = str(uuid.uuid4())
+def _center_row(center_id: str, status: str) -> dict:
+    return {
+        "id": center_id,
+        "label": "Memory",
+        "memory": "center",
+        "user_name": "test_user",
+        "status": status,
+    }
 
-    hg.get_subgraph = MagicMock(
-        return_value={
-            "core_node": {"id": center_id, "memory": "center", "metadata": {}},
-            "neighbors": [{"id": neighbor_id, "memory": "neighbor", "metadata": {}}],
-            "edges": [{"source": center_id, "target": neighbor_id, "type": "RELATED"}],
-        }
+
+def test_get_subgraph_accepts_the_call_shape_tree_py_uses():
+    """TreeTextMemory.search() calls get_subgraph(center_id=, depth=, center_status=, user_name=).
+
+    Regression: the HugeGraph signature had no ``center_status``, so the live
+    recall path raised ``TypeError: got an unexpected keyword argument``. The
+    previous version of this test replaced ``get_subgraph`` with a MagicMock and
+    then asserted the mock had been called, which is why the missing parameter
+    went unnoticed. Drive the real method instead.
+    """
+    hg = _make_hugegraph_mock()
+    center_id, neighbor_id = str(uuid.uuid4()), str(uuid.uuid4())
+    # The center read is REST-first (delete-visibility probe, G11): drive the
+    # real getVerticesById path instead of relying on the gremlin fallback.
+    hg._g.getVerticesById.return_value = [
+        SimpleNamespace(properties=_center_row(center_id, "activated"))
+    ]
+
+    def _exec(query: str):
+        assert "repeat" in query  # the center lookup must NOT fall back to gremlin
+        # Shapes probed on the live 1.8.0 HStore: an edge elementMap wraps its
+        # endpoints as {"id":…, "label":…} dicts and carries scalar property
+        # values, while vertex elementMaps are the same flat map.
+        return [
+            {
+                "objects": [
+                    {
+                        "id": "edge-1",
+                        "label": "MEMORY_RELATION",
+                        "OUT": {"id": center_id, "label": "Memory"},
+                        "IN": {"id": neighbor_id, "label": "Memory"},
+                        "relation_type": "PARENT",
+                        "user_name": "test_user",
+                    },
+                    {
+                        "id": neighbor_id,
+                        "label": "Memory",
+                        "memory": "neighbor",
+                        "user_name": "test_user",
+                        "status": "archived",
+                    },
+                ]
+            }
+        ]
+
+    hg._gremlin.exec.side_effect = _exec
+
+    result = hg.get_subgraph(
+        center_id=center_id, depth=2, center_status="activated", user_name="test_user"
     )
 
-    result = hg.get_subgraph(center_id, depth=2, user_name="test_user")
-    hg.get_subgraph.assert_called_once_with(center_id, depth=2, user_name="test_user")
     assert result["core_node"]["id"] == center_id
-    assert len(result["neighbors"]) == 1
+    assert [n["id"] for n in result["neighbors"]] == [neighbor_id]
+    assert result["edges"] == [{"source": center_id, "target": neighbor_id, "type": "PARENT"}]
+
+
+def test_get_subgraph_returns_empty_when_center_status_mismatches():
+    """An ineligible center yields no core node and no neighbours, like Neo4j."""
+    hg = _make_hugegraph_mock()
+    center_id = str(uuid.uuid4())
+    hg._g.getVerticesById.return_value = [
+        SimpleNamespace(properties=_center_row(center_id, "archived"))
+    ]
+
+    result = hg.get_subgraph(
+        center_id=center_id, depth=2, center_status="activated", user_name="test_user"
+    )
+
+    assert result == {"core_node": None, "neighbors": [], "edges": []}
+    hg._gremlin.exec.assert_not_called()  # REST already answered; no fallback
+
+
+def test_get_subgraph_without_center_status_skips_the_filter():
+    """``center_status=None`` disables the gate, matching the Neo4j backend."""
+    hg = _make_hugegraph_mock()
+    center_id = str(uuid.uuid4())
+    hg._g.getVerticesById.return_value = [
+        SimpleNamespace(properties=_center_row(center_id, "archived"))
+    ]
+    hg._gremlin.exec.return_value = []
+
+    result = hg.get_subgraph(center_id=center_id, center_status=None, user_name="test_user")
+
+    assert result["core_node"]["id"] == center_id

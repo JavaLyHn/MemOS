@@ -10,11 +10,10 @@
 //   POST http://<host>:8080/apis/raft/leader/transfer  (if cluster)
 //   POST http://<host>:8080/gremlin  with body: { "gremlin": "<content>" }
 
-// TODO(hugegraph): this DDL is the only definition of the MemOS schema. The
-// Python provider (src/memos/graph_dbs/hugegraph.py) has no create_index /
-// ensure-schema counterpart to the Neo4j backend, so a fresh graph is unusable
-// until this file has been loaded by hand and nothing verifies at startup that
-// the property keys and indexes below actually exist. Known gaps:
+// TODO(hugegraph): the Python provider (src/memos/graph_dbs/hugegraph.py) now
+// creates this same schema itself from __init__, so loading this file by hand
+// is optional — it remains the human-readable DDL for Gremlin Console users.
+// Known gaps:
 //   - no index on `delete_record_id` / `delete_time`, although
 //     delete_node_by_mem_cube_id / recover_memory_by_mem_cube_id filter on them
 //     (the user_name / status indexes still narrow the scan);
@@ -68,13 +67,10 @@ schema.edgeLabel("MEMORY_RELATION")
     .create()
 
 // ── Index Labels ───────────────────────────────────────────────────────────
-schema.indexLabel("memoryByUserId")
-    .onV("Memory")
-    .by("user_name")
-    .secondary()
-    .ifNotExist()
-    .create()
-
+// No index on user_name alone (the old `memoryByUserId`): the server rejects a
+// secondary index whose fields a composite already covers
+// (IndexLabelBuilder.checkRepeatSecondaryIndex), and queries on user_name use
+// the leading field of memoryByUserAndType / memoryByUserAndStatus anyway.
 schema.indexLabel("memoryByMemoryType")
     .onV("Memory")
     .by("memory_type")

@@ -12,10 +12,13 @@ It now merges in place: the newly written node becomes the fused row, the older
 one is archived and pointed at it.
 """
 
+import json
+import uuid
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
-from memos.memories.textual.item import TreeNodeTextualMemoryMetadata
+from memos.memories.textual.item import TextualMemoryItem, TreeNodeTextualMemoryMetadata
 from memos.memories.textual.tree_text_memory.organize.handler import NodeHandler, _relation_text
 
 
@@ -191,20 +194,48 @@ def test_merge_without_a_vector_store_still_archives():
 
 
 def _conflict_pair():
-    a = _item("newer")
-    b = _item("older")
-    a.metadata.updated_at = "2026-10-16T12:00:00+08:00"
-    b.metadata.updated_at = "2026-10-15T12:00:00+08:00"
-    return a, b
+    def node(item_id, text, created_at):
+        return TextualMemoryItem(
+            id=item_id,
+            memory=text,
+            metadata=TreeNodeTextualMemoryMetadata(
+                created_at=created_at, embedding=[0.1], memory_type="LongTermMemory"
+            ),
+        )
+
+    return (
+        node(
+            str(uuid.uuid5(uuid.NAMESPACE_URL, "newer")), "newer text", "2026-10-16T12:00:00+08:00"
+        ),
+        node(
+            str(uuid.uuid5(uuid.NAMESPACE_URL, "older")), "older text", "2026-10-15T12:00:00+08:00"
+        ),
+    )
 
 
 def _resolving_handler(response):
     handler = _handler()
     handler.llm.generate.return_value = response
+    handler.graph_store.get_edges.return_value = []
     # 只验证走哪条分支，融合与落库各自另有测试。
     handler._merge_metadata = MagicMock(return_value=TreeNodeTextualMemoryMetadata())
     handler._resolve_in_graph = MagicMock()
     return handler
+
+
+def _assert_archived_not_deleted(handler, newer, older):
+    """融合不出来时只归档较旧的一方，并把它的原文记进新节点的 history；原实现 delete_node，不可逆。"""
+    handler._resolve_in_graph.assert_not_called()
+    handler.graph_store.delete_node.assert_not_called()
+    updates = {c.args[0]: c.args[1] for c in handler.graph_store.update_node.call_args_list}
+    assert set(updates) == {newer.id, older.id}
+    assert updates[older.id]["status"] == "archived"
+    assert "valid_to" in updates[older.id]
+    assert [json.loads(h)["memory"] for h in updates[newer.id]["history"]] == ["older text"]
+    assert "memory" not in updates[newer.id]
+    handler.graph_store.add_edge.assert_called_once_with(
+        older.id, newer.id, type="MERGED_TO", user_name="tenant-b"
+    )
 
 
 def test_resolve_falls_back_when_the_answer_is_absurdly_long():
@@ -213,10 +244,9 @@ def test_resolve_falls_back_when_the_answer_is_absurdly_long():
     handler = _resolving_handler("<answer>" + "\\" * 200_000 + "</answer>")
     a, b = _conflict_pair()
 
-    handler.resolve(a, b, "contradictory", user_name="tenant-b")
+    handler.resolve(a, b, "redundant", user_name="tenant-b")
 
-    handler._resolve_in_graph.assert_not_called()
-    handler.graph_store.delete_node.assert_called_once_with("older", user_name="tenant-b")
+    _assert_archived_not_deleted(handler, a, b)
 
 
 def test_resolve_falls_back_when_there_is_no_answer_tag():
@@ -225,10 +255,9 @@ def test_resolve_falls_back_when_there_is_no_answer_tag():
     handler = _resolving_handler("I could not decide.")
     a, b = _conflict_pair()
 
-    handler.resolve(a, b, "contradictory", user_name="tenant-b")
+    handler.resolve(a, b, "redundant", user_name="tenant-b")
 
-    handler._resolve_in_graph.assert_not_called()
-    handler.graph_store.delete_node.assert_called_once_with("older", user_name="tenant-b")
+    _assert_archived_not_deleted(handler, a, b)
 
 
 def test_resolve_falls_back_when_the_answer_is_empty():
@@ -236,10 +265,9 @@ def test_resolve_falls_back_when_the_answer_is_empty():
     handler = _resolving_handler("<answer>   </answer>")
     a, b = _conflict_pair()
 
-    handler.resolve(a, b, "contradictory", user_name="tenant-b")
+    handler.resolve(a, b, "redundant", user_name="tenant-b")
 
-    handler._resolve_in_graph.assert_not_called()
-    handler.graph_store.delete_node.assert_called_once_with("older", user_name="tenant-b")
+    _assert_archived_not_deleted(handler, a, b)
 
 
 def test_resolve_merges_a_normal_answer():
@@ -248,9 +276,7 @@ def test_resolve_merges_a_normal_answer():
 
     handler.resolve(a, b, "redundant", user_name="tenant-b")
 
-    handler._merge_metadata.assert_called_once_with(
-        "合并后的偏好", a.metadata, b.metadata
-    )
+    handler._merge_metadata.assert_called_once_with("合并后的偏好", a.metadata, b.metadata)
     handler._resolve_in_graph.assert_called_once()
 
 

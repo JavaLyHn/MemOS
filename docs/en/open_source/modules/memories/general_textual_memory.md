@@ -7,6 +7,7 @@ desc: "`GeneralTextMemory` is a flexible, vector-based textual memory module in 
 
 - [Memory Structure](#memory-structure)
   - [Metadata Fields (`TextualMemoryMetadata`)](#metadata-fields-textualmemorymetadata)
+- [Optional: Hybrid (Vector + BM25) Retrieval](#optional-hybrid-vector--bm25-retrieval)
 - [API Summary (`GeneralTextMemory`)](#api-summary-generaltextmemory)
   - [Initialization](#initialization)
   - [Core Methods](#core-methods)
@@ -54,6 +55,35 @@ Unlike NaiveTextMemory, which relies on keyword matching, GeneralTextMemory util
 | **Execution Speed** | ✅ Fast (O(n))                    | ⚠️ Slower (indexing + querying)            |
 | **Suitable Scale** | < 1K memories                     | 10K - 100K memories                        |
 | **Predictability** | ✅ Intuitive results               | ⚠️ Black box model
+
+### Optional: Hybrid (Vector + BM25) Retrieval
+
+Set `hybrid_search` to fuse the vector ranking with a BM25 lexical ranking
+(Reciprocal Rank Fusion by default, or weighted min-max normalisation). Leave it
+unset and search stays exactly vector-only.
+
+```python
+config = MemoryConfigFactory(
+    backend="general_text",
+    config={
+        "extractor_llm": { ... },
+        "embedder": { ... },
+        "vector_db": {"backend": "qdrant", ...},
+        "hybrid_search": {"fusion": "rrf", "candidate_top_k": 50},
+    },
+)
+```
+
+- Install `memos[hybrid-search]` for `rank-bm25`. Without it search degrades to
+  vector-only rather than failing.
+- The backend must be able to snapshot item text without vectors
+  (`BaseVecDB.supports_text_snapshot`; currently Qdrant). Any other backend makes
+  construction raise `ConfigurationError` instead of silently indexing an empty
+  corpus.
+- The BM25 index is built in-process from a payload-only snapshot of the whole
+  collection, so rebuild cost grows with memory count. `index_ttl_seconds` bounds
+  staleness when other processes write; writes through this instance invalidate
+  the index immediately.
 
 
 ## API Summary (`GeneralTextMemory`)

@@ -5,7 +5,6 @@ import time
 import traceback
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from memos.api.handlers.formatters_handler import (
@@ -18,6 +17,7 @@ from memos.log import (
     summarize_search_request,
     summarize_search_results,
 )
+from memos.mem_reader.tag_matcher import apply_semantic_custom_tags
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
 from memos.mem_scheduler.schemas.task_schemas import (
     ADD_TASK_LABEL,
@@ -25,6 +25,18 @@ from memos.mem_scheduler.schemas.task_schemas import (
     MEM_READ_TASK_LABEL,
 )
 from memos.memories.textual.item import TextualMemoryItem
+from memos.memories.textual.owner import (
+    OwnerView,
+    build_write_views,
+    filter_by_allow_memory_view,
+    normalize_id_list,
+    stamp_owner,
+)
+from memos.memories.textual.two_stage import (
+    archive_coarse_nodes,
+    build_coarse_items,
+    two_stage_enabled,
+)
 from memos.multi_mem_cube.views import MemCubeView
 from memos.search import resolve_filter_for_cube, search_text_memories
 from memos.types.general_types import (
@@ -34,10 +46,30 @@ from memos.types.general_types import (
     SearchMode,
     UserContext,
 )
-from memos.utils import timed, timed_stage
+from memos.utils import normalize_to_utc_iso, timed, timed_stage, utc_now
 
 
 logger = get_logger(__name__)
+
+
+def _as_memory_ids(values: Any) -> list[str]:
+    """Normalize whatever a text-memory ``add()`` returned into plain id strings.
+
+    The contract is ``list[str]``, but ids and graph nodes have been mixed up
+    before (a reassembler thread mutating the returned list in place), and every
+    downstream use here — ``json.dumps`` into the scheduler message, zipping with
+    the added items, the response payload — assumes strings. Cheap insurance
+    against a 500 on the write path.
+    """
+    ids: list[str] = []
+    for value in values or []:
+        if isinstance(value, str):
+            ids.append(value)
+        elif isinstance(value, dict):
+            ids.append(str(value.get("id", "")))
+        else:
+            ids.append(str(getattr(value, "id", value)))
+    return ids
 
 
 if TYPE_CHECKING:
@@ -63,31 +95,72 @@ class SingleCubeView(MemCubeView):
         """
         This is basically your current handle_add_memories logic,
         but scoped to a single cube_id.
+
+        One extraction view is produced per owner: a plain single-user request
+        keeps exactly one view (historical behavior and cost); group chat,
+        agent-independent memory and public memory add views on top.
         """
         sync_mode = add_req.async_mode or self._get_sync_mode()
         self.logger.info(
             f"[DIAGNOSTIC] single_cube.add_memories called for cube_id: {self.cube_id}. "
             f"sync_mode: {sync_mode}. request={summarize_add_request(add_req)}"
         )
-        user_context = UserContext(
+
+        raw_messages = getattr(add_req, "raw_messages", None)
+        views = build_write_views(
             user_id=add_req.user_id,
-            mem_cube_id=self.cube_id,
-            session_id=add_req.session_id or "default_session",
-            manager_user_id=add_req.manager_user_id,
-            project_id=add_req.project_id,
+            agent_id=getattr(add_req, "agent_id", None),
+            group_id=getattr(add_req, "group_id", None),
+            messages=(
+                raw_messages
+                if raw_messages is not None
+                else (add_req.messages if isinstance(add_req.messages, list) else None)
+            ),
+            info=add_req.info,
+            allow_public=bool(getattr(add_req, "allow_public", False)),
+            tenant=self.cube_id,
         )
 
-        target_session_id = add_req.session_id or "default_session"
-        self.logger.info(
-            f"[SingleCubeView] cube={self.cube_id} "
-            f"Processing add with mode={sync_mode}, session={target_session_id}"
-        )
-
-        all_memories = self._process_text_mem(add_req, user_context, sync_mode)
+        all_memories: list[dict[str, Any]] = []
+        for view in views:
+            # Always narrow the request to a single string user_id: a list of one
+            # participant would otherwise leak into UserContext / scheduler.
+            view_req = self._request_for_view(add_req, view)
+            user_context = UserContext(
+                user_id=view.user_id or view.agent_id or self.cube_id,
+                mem_cube_id=self.cube_id,
+                session_id=add_req.session_id or "default_session",
+                manager_user_id=add_req.manager_user_id,
+                project_id=add_req.project_id,
+            )
+            all_memories.extend(
+                self._process_text_mem(view_req, user_context, sync_mode, owner_view=view)
+            )
 
         self.logger.info(f"[SingleCubeView] cube={self.cube_id} total_results={len(all_memories)}")
-
         return all_memories
+
+    @staticmethod
+    def _request_for_view(add_req: APIADDRequest, view: OwnerView) -> APIADDRequest:
+        """Narrow the request to one owner view (messages / ids / info)."""
+        info = dict(view.info)
+        if view.agent_id:
+            info.setdefault("agent_id", view.agent_id)
+        if view.group_id:
+            info.setdefault("group_id", view.group_id)
+
+        user_ids = normalize_id_list(add_req.user_id)
+        return add_req.model_copy(
+            update={
+                "user_id": view.user_id or (user_ids[0] if user_ids else view.agent_id),
+                "agent_id": view.agent_id,
+                "group_id": view.group_id,
+                "allow_public": False,
+                "messages": view.messages,
+                "raw_messages": view.messages,
+                "info": info,
+            }
+        )
 
     @timed
     def search_memories(self, search_req: APISearchRequest) -> dict[str, Any]:
@@ -96,6 +169,7 @@ class SingleCubeView(MemCubeView):
         Preference memories are now searched through the same _search_text flow.
         """
         cube_filter = resolve_filter_for_cube(search_req.filter, self.cube_id)
+        cube_filter = self._with_owner_scope(search_req, cube_filter)
         if cube_filter is not search_req.filter:
             import copy
 
@@ -115,9 +189,12 @@ class SingleCubeView(MemCubeView):
             "act_mem": [],
             "para_mem": [],
             "pref_mem": [],
+            "dream_mem": [],
             "pref_note": "",
             "tool_mem": [],
             "skill_mem": [],
+            "event_mem": [],
+            "profile_mem": [],
         }
 
         # Determine search mode
@@ -136,6 +213,48 @@ class SingleCubeView(MemCubeView):
         self.logger.info("Search result summary: %s", summarize_search_results(memories_result))
         return memories_result
 
+    def _with_owner_scope(
+        self, search_req: APISearchRequest, cube_filter: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """Constrain the read to the viewer's owner scopes.
+
+        Legacy nodes (written before the owner migration) are still returned
+        through the ``owner_type IS NULL`` branch, matched on their
+        compatibility ``user_id`` / ``agent_id`` property, so enabling the
+        guard before the backfill does not silently lose memories.
+        """
+        from memos.memories.textual.owner import (
+            inject_owner_scope,
+            normalize_id_list,
+            owner_scope_enforced,
+            owner_scope_filter,
+        )
+
+        if not owner_scope_enforced():
+            return cube_filter
+
+        user_ids = (
+            [search_req.user_id.strip()]
+            if search_req.user_id and search_req.user_id.strip()
+            else []
+        )
+        agent_ids = normalize_id_list(getattr(search_req, "agent_id", None))
+        group_id = getattr(search_req, "group_id", None)
+        group_ids = [group_id] if group_id else []
+        if not user_ids and not agent_ids:
+            # Fail closed: a read without any subject used to fall back to an
+            # unscoped tenant-wide query and could return every participant's
+            # private / agent / group memory.
+            return inject_owner_scope(cube_filter, {"owner_type": "__none__"})
+
+        scope = owner_scope_filter(
+            user_ids=user_ids,
+            agent_ids=agent_ids,
+            group_ids=group_ids,
+            tenant=self.cube_id,
+        )
+        return inject_owner_scope(cube_filter, scope)
+
     @timed
     def feedback_memories(self, feedback_req: APIFeedbackRequest) -> dict[str, Any]:
         target_session_id = feedback_req.session_id or "default_session"
@@ -150,7 +269,7 @@ class SingleCubeView(MemCubeView):
                     mem_cube=self.naive_mem_cube,
                     label=MEM_FEEDBACK_TASK_LABEL,
                     content=feedback_req_str,
-                    timestamp=datetime.utcnow(),
+                    timestamp=utc_now(),
                 )
                 # Use scheduler submission to ensure tracking and metrics
                 self.mem_scheduler.submit_messages(messages=[message_item_feedback])
@@ -230,7 +349,15 @@ class SingleCubeView(MemCubeView):
         user_context: UserContext,
     ) -> list:
         target_session_id = search_req.session_id or "default_session"
-        search_filter = {"session_id": search_req.session_id} if search_req.session_id else None
+        # Keep the owner scope (already merged into ``search_req.filter`` by
+        # ``_with_owner_scope``); dropping it here let deep search read every
+        # participant's private memory.
+        search_filter = search_req.filter
+        if search_req.session_id:
+            session_filter = {"session_id": search_req.session_id}
+            search_filter = (
+                {"and": [search_filter, session_filter]} if search_filter else session_filter
+            )
 
         info = {
             "user_id": search_req.user_id,
@@ -253,6 +380,7 @@ class SingleCubeView(MemCubeView):
             user_context.mem_cube_id,
             include_embedding=search_req.dedup == "sim",
             neighbor_discovery=search_req.neighbor_discovery,
+            save_sources=search_req.include_sources,
         )
 
     def _agentic_search(
@@ -261,12 +389,54 @@ class SingleCubeView(MemCubeView):
         deepsearch_results = self.deepsearch_agent.run(
             search_req.query, user_id=user_context.mem_cube_id
         )
-        return self._postformat_memories(
+        formatted = self._postformat_memories(
             deepsearch_results,
             user_context.mem_cube_id,
             include_embedding=search_req.dedup == "sim",
             neighbor_discovery=search_req.neighbor_discovery,
+            save_sources=search_req.include_sources,
         )
+        return self._filter_agentic_owner(formatted, search_req)
+
+    def _filter_agentic_owner(
+        self, memories: list[dict[str, Any]], search_req: APISearchRequest
+    ) -> list[dict[str, Any]]:
+        """Post-filter agentic results, which are not produced by our searcher.
+
+        The agentic agent only receives a query, so owner scope has to be
+        re-applied on the way out. Results without owner metadata are legacy
+        nodes and stay visible; anything tagged with a foreign owner is dropped.
+        """
+        agent_ids = set(normalize_id_list(getattr(search_req, "agent_id", None)))
+        group_id = getattr(search_req, "group_id", None)
+        viewer_user_id = search_req.user_id.strip() if search_req.user_id else None
+        allowed = {("user", viewer_user_id), ("public", self.cube_id)}
+        allowed.update(("agent", agent_id) for agent_id in agent_ids)
+        if group_id:
+            allowed.add(("group", group_id))
+
+        kept: list[dict[str, Any]] = []
+        for memory in memories:
+            metadata = memory.get("metadata") if isinstance(memory, dict) else None
+            owner_type = (metadata or {}).get("owner_type")
+            owner_id = (metadata or {}).get("owner_id")
+            if owner_type:
+                if (owner_type, owner_id) in allowed:
+                    kept.append(memory)
+                continue
+            # Legacy node: apply the same compatibility-id rule as the graph
+            # owner filter (``owner_type IS NULL`` + user_id/agent_id/group_id).
+            legacy_user = (metadata or {}).get("user_id")
+            legacy_agent = (metadata or {}).get("agent_id")
+            legacy_group = (metadata or {}).get("group_id")
+            if legacy_user and str(legacy_user) != viewer_user_id:
+                continue
+            if legacy_agent and str(legacy_agent) not in agent_ids:
+                continue
+            if legacy_group and str(legacy_group) != group_id:
+                continue
+            kept.append(memory)
+        return kept
 
     def _fine_search(
         self,
@@ -380,6 +550,7 @@ class SingleCubeView(MemCubeView):
             user_context.mem_cube_id,
             include_embedding=search_req.dedup == "sim",
             neighbor_discovery=search_req.neighbor_discovery,
+            save_sources=search_req.include_sources,
         )
 
         logger.info(f"Found {len(formatted_memories)} memories for user {search_req.user_id}")
@@ -414,6 +585,7 @@ class SingleCubeView(MemCubeView):
             user_context.mem_cube_id,
             include_embedding=(search_req.dedup in ("mmr", "sim")),
             neighbor_discovery=search_req.neighbor_discovery,
+            save_sources=search_req.include_sources,
         )
 
     def _postformat_memories(
@@ -422,6 +594,7 @@ class SingleCubeView(MemCubeView):
         user_name: str,
         include_embedding: bool = False,
         neighbor_discovery: bool = False,
+        save_sources: bool = True,
     ) -> list:
         """
         Postprocess search results.
@@ -468,7 +641,8 @@ class SingleCubeView(MemCubeView):
             final_items = search_results
 
         return [
-            format_memory_item(data, include_embedding=include_embedding) for data in final_items
+            format_memory_item(data, include_embedding=include_embedding, save_sources=save_sources)
+            for data in final_items
         ]
 
     def _mix_search(
@@ -532,11 +706,14 @@ class SingleCubeView(MemCubeView):
                     mem_cube=self.naive_mem_cube,
                     label=MEM_READ_TASK_LABEL,
                     content=json.dumps(mem_ids),
-                    timestamp=datetime.utcnow(),
+                    timestamp=utc_now(),
                     user_name=self.cube_id,
                     info={
                         **(add_req.info or {}),
                         "is_upload_skill": getattr(add_req, "is_upload_skill", False),
+                        "custom_tags": add_req.custom_tags,
+                        "custom_tags_match": getattr(add_req, "custom_tags_match", None),
+                        "custom_extract_prompt": getattr(add_req, "custom_extract_prompt", None),
                     },
                     chat_history=add_req.chat_history,
                     user_context=user_context,
@@ -559,10 +736,190 @@ class SingleCubeView(MemCubeView):
                 mem_cube=self.naive_mem_cube,
                 label=ADD_TASK_LABEL,
                 content=json.dumps(mem_ids),
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
                 user_name=self.cube_id,
             )
             self.mem_scheduler.submit_messages(messages=[message_item_add])
+
+    @timed
+    def extract_memories(self, add_req: APIADDRequest) -> list[dict[str, Any]]:
+        """Run the reader extraction pipeline without persisting anything.
+
+        This backs the ``/product/extract_memory`` dry-run endpoint: it answers
+        "what would be extracted from these messages?" without writing to the
+        graph, the vector store, or the scheduler.
+        """
+        sync_mode = getattr(add_req, "async_mode", None) or "sync"
+        user_context = UserContext(
+            user_id=add_req.user_id,
+            mem_cube_id=self.cube_id,
+            session_id=add_req.session_id or "default_session",
+            manager_user_id=add_req.manager_user_id,
+            project_id=add_req.project_id,
+        )
+
+        flattened_local, _, _ = self._extract_text_mem(add_req, user_context, sync_mode)
+        return [
+            {
+                **format_memory_item(memory, include_embedding=False, save_sources=True),
+                "cube_id": self.cube_id,
+            }
+            for memory in flattened_local
+            if memory.metadata.memory_type != "RawFileMemory"
+        ]
+
+    def _resolve_extract_mode(self, add_req: APIADDRequest, sync_mode: str) -> str:
+        # async: always fast (ignore add_req.mode)
+        # sync: use add_req.mode == "fast" to switch to fast pipeline, otherwise fine
+        if sync_mode == "async":
+            return "fast"
+        return "fast" if add_req.mode == "fast" else "fine"
+
+    @staticmethod
+    def _apply_chat_time(memories: list[TextualMemoryItem]) -> None:
+        """Propagate the message-level ``chat_time`` onto memory metadata.
+
+        The reader keeps ``chat_time`` on each ``SourceMessage`` only, which
+        makes it impossible to filter or sort by event time after the fact.
+        Copy the first non-empty source value and normalize it to UTC ISO when
+        the value is parseable; keep the original string otherwise.
+        """
+        for memory in memories:
+            if getattr(memory.metadata, "chat_time", None):
+                continue
+            raw = None
+            for source in memory.metadata.sources or []:
+                raw = getattr(source, "chat_time", None)
+                if raw:
+                    break
+            if raw:
+                memory.metadata.chat_time = normalize_to_utc_iso(raw) or str(raw)
+
+    @staticmethod
+    def _fill_source_fields(memories: list[TextualMemoryItem], session_id: str) -> None:
+        """Give every chat source the cloud fields ``lang`` and ``message_id``."""
+        from memos.api.message_store import message_id_for
+        from memos.memories.textual.tree_text_memory.retrieve.retrieve_utils import detect_lang
+
+        for memory in memories:
+            for source in getattr(memory.metadata, "sources", None) or []:
+                if getattr(source, "type", None) != "chat":
+                    continue
+                content = getattr(source, "content", None) or memory.memory
+                if not getattr(source, "lang", None):
+                    source.lang = detect_lang(content)
+                if not getattr(source, "message_id", None):
+                    source.message_id = message_id_for(
+                        session_id, getattr(source, "role", None) or "", content
+                    )
+
+    def _extract_text_mem(
+        self,
+        add_req: APIADDRequest,
+        user_context: UserContext,
+        sync_mode: str,
+        owner_view: OwnerView | None = None,
+    ) -> tuple[list[TextualMemoryItem], str, int]:
+        """Run the reader and return ``(memories, extract_mode, get_memory_ms)``."""
+        target_session_id = add_req.session_id or "default_session"
+        extract_mode = self._resolve_extract_mode(add_req, sync_mode)
+        self.logger.info(
+            "[SingleCubeView] cube=%s Processing text memory "
+            "with sync_mode=%s, extract_mode=%s, add_mode=%s",
+            user_context.mem_cube_id,
+            sync_mode,
+            extract_mode,
+            add_req.mode,
+        )
+
+        raw_messages = getattr(add_req, "raw_messages", None)
+        messages = raw_messages if raw_messages is not None else add_req.messages
+
+        # Stage 1+2: parse + embedding (logged inside get_memory via timed_stage)
+        with timed_stage("add", "get_memory", cube_id=self.cube_id) as ts_gm:
+            memories_local = self.mem_reader.get_memory(
+                [messages],
+                type="chat",
+                info={
+                    **(add_req.info or {}),
+                    "custom_tags": add_req.custom_tags,
+                    "user_id": add_req.user_id,
+                    "session_id": target_session_id,
+                },
+                mode=extract_mode,
+                user_name=user_context.mem_cube_id,
+                chat_history=add_req.chat_history,
+                user_context=user_context,
+                is_upload_skill=getattr(add_req, "is_upload_skill", False),
+            )
+
+        flattened_local = [mm for m in memories_local for mm in m]
+        self._apply_chat_time(flattened_local)
+        self._fill_source_fields(flattened_local, target_session_id)
+        apply_semantic_custom_tags(
+            flattened_local,
+            add_req.custom_tags,
+            getattr(self.mem_reader, "embedder", None),
+            enabled=getattr(add_req, "custom_tags_match", None),
+        )
+
+        # Event memory is an opt-in view (cloud: include "event" in
+        # `allow_memory_view`), so it never adds an LLM call to existing traffic.
+        allow_views = getattr(add_req, "allow_memory_view", None)
+        if allow_views is not None and "event" in allow_views:
+            flattened_local.extend(self._extract_event_memories(add_req, user_context, sync_mode))
+
+        # Write-side generation whitelist (cloud `allow_memory_view`).
+        flattened_local = filter_by_allow_memory_view(flattened_local, allow_views)
+
+        # Owner stamping + lifecycle fields. Done before the write so every
+        # backend (graph property, vector payload) sees the same values.
+        if owner_view is not None:
+            for memory in flattened_local:
+                stamp_owner(memory, owner_view, task_id=add_req.task_id)
+        expires_at = getattr(add_req, "expires_at", None)
+        if expires_at:
+            for memory in flattened_local:
+                memory.metadata.expires_at = normalize_to_utc_iso(expires_at) or expires_at
+
+        # Explicitly set source_doc_id to metadata if present in info
+        source_doc_id = (add_req.info or {}).get("source_doc_id")
+        if source_doc_id:
+            for memory in flattened_local:
+                memory.metadata.source_doc_id = source_doc_id
+
+        return flattened_local, extract_mode, ts_gm.duration_ms
+
+    def _extract_event_memories(
+        self,
+        add_req: APIADDRequest,
+        user_context: UserContext,
+        sync_mode: str,
+    ) -> list[TextualMemoryItem]:
+        from memos.mem_reader.event_extractor import EventExtractor
+
+        llm = getattr(self.mem_reader, "general_llm", None) or getattr(self.mem_reader, "llm", None)
+        raw_messages = getattr(add_req, "raw_messages", None)
+        messages = raw_messages if raw_messages is not None else add_req.messages
+        if llm is None or not isinstance(messages, list):
+            return []
+        extractor = EventExtractor(llm)
+        try:
+            return extractor.extract(
+                messages,
+                info={
+                    **(add_req.info or {}),
+                    "user_id": user_context.user_id,
+                    "custom_tags": add_req.custom_tags,
+                },
+                user_name=user_context.mem_cube_id,
+                session_id=add_req.session_id,
+                need_embed=True,
+                embedder=getattr(self.mem_reader, "embedder", None),
+            )
+        except Exception:
+            self.logger.warning("Event extraction failed", exc_info=True)
+            return []
 
     @timed
     def _process_text_mem(
@@ -570,6 +927,7 @@ class SingleCubeView(MemCubeView):
         add_req: APIADDRequest,
         user_context: UserContext,
         sync_mode: str,
+        owner_view: OwnerView | None = None,
     ) -> list[dict[str, Any]]:
         """
         Process and add text memories (including preference memories).
@@ -584,68 +942,55 @@ class SingleCubeView(MemCubeView):
         Returns:
             List of formatted memory responses
         """
-        target_session_id = add_req.session_id or "default_session"
-
-        # Decide extraction mode:
-        # - async: always fast (ignore add_req.mode)
-        # - sync: use add_req.mode == "fast" to switch to fast pipeline, otherwise fine
-        if sync_mode == "async":
-            extract_mode = "fast"
-        else:  # sync
-            extract_mode = "fast" if add_req.mode == "fast" else "fine"
-
-        self.logger.info(
-            "[SingleCubeView] cube=%s Processing text memory "
-            "with sync_mode=%s, extract_mode=%s, add_mode=%s",
-            user_context.mem_cube_id,
-            sync_mode,
-            extract_mode,
-            add_req.mode,
-        )
         process_start = time.perf_counter()
 
-        # Stage 1+2: parse + embedding (logged inside get_memory via timed_stage)
-        with timed_stage("add", "get_memory", cube_id=self.cube_id) as ts_gm:
-            memories_local = self.mem_reader.get_memory(
-                [add_req.messages],
-                type="chat",
-                info={
-                    **(add_req.info or {}),
-                    "custom_tags": add_req.custom_tags,
-                    "user_id": add_req.user_id,
-                    "session_id": target_session_id,
-                },
-                mode=extract_mode,
-                user_name=user_context.mem_cube_id,
-                chat_history=add_req.chat_history,
-                user_context=user_context,
-                is_upload_skill=getattr(add_req, "is_upload_skill", False),
-            )
-        get_memory_ms = ts_gm.duration_ms
-        flattened_local = [mm for m in memories_local for mm in m]
-
-        # Explicitly set source_doc_id to metadata if present in info
-        source_doc_id = (add_req.info or {}).get("source_doc_id")
-        if source_doc_id:
-            for memory in flattened_local:
-                memory.metadata.source_doc_id = source_doc_id
+        flattened_local, extract_mode, get_memory_ms = self._extract_text_mem(
+            add_req, user_context, sync_mode, owner_view=owner_view
+        )
 
         # Add memories to text_mem
         mem_group = [
             memory for memory in flattened_local if memory.metadata.memory_type != "RawFileMemory"
         ]
 
+        # Two-stage add (default off): make the coarse view searchable first.
+        two_stage = two_stage_enabled() and bool(add_req.task_id)
+        if two_stage and mem_group:
+            coarse_items = build_coarse_items(
+                mem_group,
+                task_id=add_req.task_id,
+                scope=f"{user_context.mem_cube_id}:{add_req.user_id or ''}:{getattr(add_req, 'agent_id', None) or ''}",
+            )
+            try:
+                self.naive_mem_cube.text_mem.add(coarse_items, user_name=user_context.mem_cube_id)
+                self.logger.info(
+                    f"[SingleCubeView] two-stage: wrote {len(coarse_items)} coarse memories "
+                    f"for task {add_req.task_id}"
+                )
+            except Exception:
+                self.logger.warning("Failed to write coarse memories", exc_info=True)
+
         # Stage 3: write_db
         with timed_stage("add", "write_db", cube_id=self.cube_id) as ts_db:
-            mem_ids_local: list[str] = self.naive_mem_cube.text_mem.add(
-                mem_group,
-                user_name=user_context.mem_cube_id,
+            mem_ids_local: list[str] = _as_memory_ids(
+                self.naive_mem_cube.text_mem.add(
+                    mem_group,
+                    user_name=user_context.mem_cube_id,
+                )
             )
 
             self.logger.info(
                 f"Added {len(mem_ids_local)} memories for user {add_req.user_id} "
                 f"in session {add_req.session_id}: {mem_ids_local}"
             )
+
+            if two_stage:
+                archive_coarse_nodes(
+                    getattr(self.naive_mem_cube.text_mem, "graph_store", None),
+                    user_name=user_context.mem_cube_id,
+                    task_id=add_req.task_id,
+                    fine_memories=mem_group,
+                )
 
             # Add raw file nodes and edges
             if self.mem_reader.save_rawfile and extract_mode == "fine":

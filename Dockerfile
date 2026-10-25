@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-ENV HF_ENDPOINT=https://hf-mirror.com
+ENV HF_ENDPOINT=https://huggingface.co
 ENV PYTHONPATH=/app/src
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -52,6 +52,19 @@ COPY docker/ ./docker
 # 运行时代码仍从 /app/src 加载（PYTHONPATH），所以热补丁挂载不受影响。
 COPY pyproject.toml README.md ./
 RUN pip install --no-cache-dir --no-deps -i "$PIP_INDEX_URL" . && rm -f pyproject.toml README.md
+
+# 把 gpt2 分词器缓存打进镜像。SentenceChunker 启动时要通过 chonkie 加载 gpt2，
+# 而集群没有外网：缓存缺失会直接 `ValueError: Tokenizer not found`，容器起不来。
+# 上游镜像也是这么做的（tag 后缀 -hf-cache，缓存同样是一份 models--gpt2）。
+ENV HF_HOME=/app/.cache/huggingface
+RUN for i in 1 2 3; do \
+        python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('gpt2')" && break; \
+        echo "tokenizer download failed (attempt $i), retrying"; sleep 5; \
+        [ "$i" = "3" ] && exit 1; \
+    done
+# 缓存齐了就不该再联网：部署容器里既没配 HF_HOME 也没联网，靠的就是 HF_HUB_OFFLINE=1。
+# 不设这一条，启动阶段会卡在 HF 的 5 次重试上（每次 10s 超时），startupProbe 直接打穿。
+ENV HF_HUB_OFFLINE=1
 
 RUN chown -R memos:memos /app
 

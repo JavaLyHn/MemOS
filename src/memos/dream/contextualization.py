@@ -13,6 +13,7 @@ from uuid import uuid4
 from memos.dream.embedding import embed_text
 from memos.dream.enrichment import DREAM_INTERNAL_INFO_KEY
 from memos.dream.prompts import CONTEXT_BINDING_PROMPT, CONTEXT_SUMMARY_PROMPT
+from memos.utils import normalize_to_utc_iso
 
 
 logger = logging.getLogger(__name__)
@@ -535,7 +536,10 @@ def _group_salience(memories: list[DreamContextSource]) -> float:
 
 
 def _group_time_range(memories: list[DreamContextSource]) -> dict[str, str | None]:
-    times = sorted(t for t in (memory.created_at for memory in memories) if t)
+    times = sorted(
+        (t for t in (memory.created_at for memory in memories) if t),
+        key=lambda t: normalize_to_utc_iso(t) or "",
+    )
     return {
         "start": times[0] if times else None,
         "end": times[-1] if times else None,

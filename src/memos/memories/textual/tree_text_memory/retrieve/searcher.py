@@ -118,6 +118,8 @@ class Searcher:
         skill_mem_top_k: int = 3,
         include_preference_memory: bool = False,
         pref_mem_top_k: int = 6,
+        include_dream_memory: bool = False,
+        dream_mem_top_k: int = 1,
         **kwargs,
     ) -> list[tuple[TextualMemoryItem, float]]:
         logger.info(
@@ -150,6 +152,8 @@ class Searcher:
             skill_mem_top_k,
             include_preference_memory,
             pref_mem_top_k,
+            include_dream_memory,
+            dream_mem_top_k,
             rerank,
         )
         return results
@@ -166,6 +170,8 @@ class Searcher:
         skill_mem_top_k: int = 3,
         include_preference_memory: bool = False,
         pref_mem_top_k: int = 6,
+        include_dream_memory: bool = False,
+        dream_mem_top_k: int = 1,
         dedup: str | None = None,
         plugin=False,
     ):
@@ -183,6 +189,8 @@ class Searcher:
             skill_mem_top_k,
             include_preference_memory,
             pref_mem_top_k,
+            include_dream_memory,
+            dream_mem_top_k,
         )
         self._update_usage_history(final_results, info, user_name)
         return final_results
@@ -204,6 +212,8 @@ class Searcher:
         skill_mem_top_k: int = 3,
         include_preference_memory: bool = False,
         pref_mem_top_k: int = 6,
+        include_dream_memory: bool = False,
+        dream_mem_top_k: int = 1,
         dedup: str | None = None,
         **kwargs,
     ) -> list[TextualMemoryItem]:
@@ -255,6 +265,8 @@ class Searcher:
                 skill_mem_top_k=skill_mem_top_k,
                 include_preference_memory=include_preference_memory,
                 pref_mem_top_k=pref_mem_top_k,
+                include_dream_memory=include_dream_memory,
+                dream_mem_top_k=dream_mem_top_k,
                 **kwargs,
             )
 
@@ -274,6 +286,8 @@ class Searcher:
             skill_mem_top_k=skill_mem_top_k,
             include_preference_memory=include_preference_memory,
             pref_mem_top_k=pref_mem_top_k,
+            include_dream_memory=include_dream_memory,
+            dream_mem_top_k=dream_mem_top_k,
             dedup=dedup,
         )
 
@@ -370,9 +384,11 @@ class Searcher:
         skill_mem_top_k: int = 3,
         include_preference_memory: bool = False,
         pref_mem_top_k: int = 6,
+        include_dream_memory: bool = False,
+        dream_mem_top_k: int = 1,
         rerank: bool = True,
     ):
-        """Run A/B/C/D/E/F retrieval paths in parallel"""
+        """Run A/B/C/D/E/F/G retrieval paths in parallel"""
         tasks = []
         id_filter = {
             "user_id": info.get("user_id", None),
@@ -491,6 +507,16 @@ class Searcher:
                         id_filter,
                         mode=mode,
                         rerank=rerank,
+                    )
+                )
+            if include_dream_memory:
+                tasks.append(
+                    executor.submit(
+                        self._retrieve_from_dream_memory,
+                        query_embedding,
+                        dream_mem_top_k,
+                        user_name,
+                        memory_type,
                     )
                 )
             results = []
@@ -648,7 +674,7 @@ class Searcher:
     ) -> list[tuple[TextualMemoryItem, float]]:
         """Keyword/fulltext path that directly calls graph DB fulltext search."""
 
-        if memory_type not in ["All", "LongTermMemory", "UserMemory"]:
+        if memory_type not in ["All", "LongTermMemory", "UserMemory", "EventMemory"]:
             return []
         if not query_embedding:
             return []
@@ -668,7 +694,11 @@ class Searcher:
             user_name,
         )
 
-        scopes = [memory_type] if memory_type != "All" else ["LongTermMemory", "UserMemory"]
+        scopes = (
+            [memory_type]
+            if memory_type != "All"
+            else ["LongTermMemory", "UserMemory", "EventMemory"]
+        )
 
         id_to_score: dict[str, float] = {}
         for scope in scopes:
@@ -786,6 +816,22 @@ class Searcher:
                         query_embedding=cot_embeddings,
                         top_k=top_k * 2,
                         memory_scope="UserMemory",
+                        search_filter=search_filter,
+                        search_priority=search_priority,
+                        user_name=user_name,
+                        id_filter=id_filter,
+                        use_fast_graph=self.use_fast_graph,
+                    )
+                )
+            if memory_type in ["All", "AllSummaryMemory", "EventMemory"]:
+                tasks.append(
+                    executor.submit(
+                        self.graph_retriever.retrieve,
+                        query=query,
+                        parsed_goal=parsed_goal,
+                        query_embedding=cot_embeddings,
+                        top_k=top_k * 2,
+                        memory_scope="EventMemory",
                         search_filter=search_filter,
                         search_priority=search_priority,
                         user_name=user_name,
@@ -1071,6 +1117,81 @@ class Searcher:
             search_filter=search_filter,
         )
 
+    # --- Path G
+
+    @timed
+    def _retrieve_from_dream_memory(
+        self,
+        query_embedding,
+        top_k,
+        user_name: str | None = None,
+        memory_type: str = "All",
+    ):
+        """取日度跨案例综合（DreamDiary）与它派生的洞察（InsightMemory），作附加位。
+
+        这两类此前一条都进不了召回，原因有两个，都要在这里绕开：
+        1. PATH-A~F 的 memory_type 白名单里没有它们（searcher 层）；
+        2. 它们的状态不是 activated（DreamDiary 是 completed / context_only），
+           而 _graph_recall 与 _vector_recall 都写死 status="activated"。
+        所以这里直接打 graph_store，显式传 status=None。
+
+        正文取 summary（中位 93 字）而不是 memory（约 630 字）：返回体要控制长度，
+        而且这两类的信息密度本来就集中在摘要上。原文仍在 metadata 里可回溯。
+        """
+        if not top_k or not query_embedding:
+            return []
+        if memory_type not in ("All", "DreamDiary", "InsightMemory"):
+            logger.info("[PATH-G] skipped (memory_type does not match)")
+            return []
+
+        vector = query_embedding[0]
+        items: list[tuple[TextualMemoryItem, float]] = []
+        for scope in ("DreamDiary", "InsightMemory"):
+            try:
+                hits = (
+                    self.graph_store.search_by_embedding(
+                        vector=vector,
+                        top_k=top_k,
+                        scope=scope,
+                        status=None,
+                        user_name=user_name,
+                    )
+                    or []
+                )
+            except Exception:
+                logger.warning("[PATH-G] %s search_by_embedding failed: %s", scope, traceback.format_exc())
+                continue
+
+            scores = {
+                str(h["id"]).strip("\"'"): h.get("score", 0.0) for h in hits if h.get("id")
+            }
+            if not scores:
+                continue
+
+            nodes = self.graph_store.get_nodes(list(scores), user_name=user_name) or []
+            for node in nodes:
+                node_id = str(node.get("id", "")).strip("\"'")
+                summary = " ".join(str((node.get("metadata") or {}).get("summary") or "").split())
+                if not summary:
+                    continue
+                node["memory"] = summary
+                try:
+                    items.append((TextualMemoryItem.from_dict(node), scores.get(node_id, 0.0)))
+                except Exception as exc:
+                    # 附加位不能因为一条记录字段不合规就把整次检索带崩，但也不能静默：
+                    # 这里是新增记忆类型时最容易踩的地方（memory_type / status 的 Literal）。
+                    logger.warning(
+                        "[PATH-G] skip malformed %s node %s: %s: %s",
+                        scope,
+                        node_id,
+                        type(exc).__name__,
+                        exc,
+                    )
+
+        items.sort(key=lambda pair: pair[1], reverse=True)
+        logger.info("[PATH-G] retrieved %d dream items", len(items))
+        return items
+
     @timed
     def _retrieve_simple(
         self,
@@ -1145,6 +1266,8 @@ class Searcher:
         skill_mem_top_k=3,
         include_preference_memory=False,
         pref_mem_top_k=6,
+        include_dream_memory=False,
+        dream_mem_top_k=1,
     ):
         """Sort results by score and trim to top_k"""
         final_items = []
@@ -1234,12 +1357,43 @@ class Searcher:
                     )
                 )
 
+        # 附加位：日度跨案例综合与洞察。单独成组，不参与下面的 top_k 竞争，
+        # 也不受 relativity 阈值影响——它们和 text_mem 是不同的东西。
+        if include_dream_memory:
+            dream_results = [
+                (item, score)
+                for item, score in results
+                if item.metadata.memory_type in ("DreamDiary", "InsightMemory")
+            ]
+            sorted_dream_results = sorted(
+                dream_results, key=lambda pair: pair[1], reverse=True
+            )[:dream_mem_top_k]
+            for item, score in sorted_dream_results:
+                if plugin and round(score, 2) == 0.00:
+                    continue
+                meta_data = item.metadata.model_dump()
+                meta_data["relativity"] = score
+                final_items.append(
+                    TextualMemoryItem(
+                        id=item.id,
+                        memory=item.memory,
+                        metadata=SearchedTreeNodeTextualMemoryMetadata(**meta_data),
+                    )
+                )
+
         # separate textual results
         results = [
             (item, score)
             for item, score in results
             if item.metadata.memory_type
-            in ["WorkingMemory", "LongTermMemory", "UserMemory", "OuterMemory", "RawFileMemory"]
+            in [
+                "WorkingMemory",
+                "LongTermMemory",
+                "UserMemory",
+                "EventMemory",
+                "OuterMemory",
+                "RawFileMemory",
+            ]
         ]
 
         sorted_results = sorted(results, key=lambda pair: pair[1], reverse=True)[:top_k]

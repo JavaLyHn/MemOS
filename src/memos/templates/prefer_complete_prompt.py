@@ -1,22 +1,28 @@
 NAIVE_EXPLICIT_PREFERENCE_EXTRACT_PROMPT = """
 You are a preference extraction assistant.
-Please extract the user's explicitly mentioned preferences from the following conversation.
+Extract the preferences explicitly stated by the user from the input below.
 
-Notes:
-- A preference means the user's own explicit, relatively stable, and reusable attitude, choice, constraint, or habit. It should be useful for future interactions, recommendations, or personalization.
-- A single user statement can be enough for an explicit preference when the user clearly states a personal preference or a future handling rule; repeated behavior is not required for explicit preferences.
-- Words like "like/dislike/want/don't want/prefer" are helpful signals, but a current task request, information-seeking question, temporary state, or safety/factual concern is not a preference by itself.
-- Expressions scoped to the current moment or task, such as "now", "today", "this time", "this document", "this task", or "current", are scope cues rather than automatic exclusions. Treat them as one-off needs unless the user also states a reusable personal preference or a future handling rule, such as "from now on", "in the future", "every time", "always", or "use this going forward".
-- Focus on preferences stated by the user. Do not turn assistant advice, search suggestions, safety guidance, factual explanations, or answer content into user preferences unless the user explicitly endorses them as their own reusable choice.
-- When the user modifies or updates their preferences for the same topic or event, extract the complete evolution process of their preference changes, including both the original and updated preferences.
+Preference criteria:
+- A preference is a relatively stable and reusable attitude, choice, constraint, or habit explicitly expressed by the user. It should be useful in future interactions, recommendations, or personalization.
+- One clear user statement is sufficient for an explicit preference. Repeated behavior is not required when the user directly states a personal preference or a rule for future interactions.
+- Words such as "like", "dislike", "want", "do not want", and "prefer" are useful signals, but a current task request, information-seeking question, temporary state, or safety or factual concern is not a preference by itself.
+- Extract only preferences that can reasonably be reused in future interactions. Temporary requirements, execution parameters, and one-off needs that apply only to the current request, task, or material are not preferences. Reusability depends on the scope expressed by the user, rather than how many times it appears in the conversation.
+- When the user modifies or updates a preference about the same topic or event, capture the complete evolution, including both the original and updated preferences.
+- When the user explicitly expresses a reusable endorsement, rejection, or choice in response to Agent or Assistant content, use only the user's own statement as preference evidence.
+
+Source attribution:
+- The input may be a conversation or a record of interactions between a user and an Agent.
+- Extract preferences only from content that can be clearly attributed to the user personally.
+- Ignore Agent or Assistant output and any context injected, retrieved, or generated during Agent execution, such as historical memories, tool calls, and tool results. Such content is not a user statement, even if it is wrapped in a user message.
+- If the source of content cannot be determined reliably, do not use it to extract preferences.
 
 Requirements:
-1. Keep only the preferences explicitly mentioned by the user and reasonably reusable beyond the current turn. Do not infer or assume. If the user mentions reasons for their preferences, include those reasons as well.
-2. Output should be a list of concise natural language summaries and the corresponding context summary. The context summary should preserve the evidence for the user's preference, without rewriting assistant-only content as if it were the user's preference.
-3. If multiple preferences are mentioned within the same topic or domain, you MUST combine them into a single entry, keep each entry information complete. Different topics of preferences should be divided into multiple entries.
-4. If no explicit preference can be reasonably extracted, return [].
+1. Do not infer or assume preferences that the user did not explicitly state. If the user explains the reason for a preference, include that reason.
+2. Return a list of concise preference summaries with their corresponding context summaries. Each context summary must preserve the user-side evidence and must not rewrite non-user content as a user preference.
+3. Combine multiple preferences from the same topic or domain into one complete entry. Use separate entries for different topics.
+4. If no explicit preference can be reasonably extracted, return `[]`.
 
-Conversation:
+Input:
 {qa_pair}
 
 Find ALL explicit preferences. If no explicit preferences found, return []. Output JSON only:
@@ -35,23 +41,29 @@ Find ALL explicit preferences. If no explicit preferences found, return []. Outp
 
 NAIVE_EXPLICIT_PREFERENCE_EXTRACT_PROMPT_ZH = """
 你是一个偏好提取助手。
-请从以下对话中提取用户明确提及的偏好。
+请从下方输入中提取用户明确表达的偏好。
 
-注意事项：
-- 偏好是指用户自身明确表达的、相对稳定且可复用的态度、选择、约束或习惯，通常能用于后续交互、推荐或个性化服务。
-- 对于显式偏好，只要用户单次清楚表达了个人偏好或后续处理规则，就可以提取；显式偏好不要求出现重复行为。
-- "喜欢/不喜欢/想要/不想要/偏好"等词汇是重要信号，但当前任务请求、信息查询、临时状态、安全或事实性疑问本身并不等同于偏好。
-- 带有“现在、今天、这次、这份、本次、当前”等当前时间或任务范围限定的表达，是范围线索而不是自动排除条件。除非用户同时表达了可复用的个人偏好或后续处理规则，如“以后、长期、每次、都按这个、今后”等，否则将其视为一次性需求。
-- 重点提取用户自己陈述的偏好。不要把助手建议、检索建议、安全提醒、事实解释或回答内容转写成用户偏好，除非用户明确认可其为自己的可复用选择。
-- 当用户针对同一主题或事件修改或更新其偏好时，提取其偏好变化的完整演变过程，包括原始偏好和更新后的偏好。
+偏好判断：
+- 偏好是用户本人明确表达的、相对稳定且可复用的态度、选择、约束或习惯，通常能用于后续交互、推荐或个性化服务。
+- 对于显式偏好，只要用户清楚表达了个人偏好或后续处理规则，单次表达即可作为证据，不要求出现重复行为。
+- “喜欢、不喜欢、想要、不想要、偏好”等词语是重要信号，但当前任务请求、信息查询、临时状态、安全或事实性疑问本身并不等同于偏好。
+- 仅提取能够合理复用于后续交互的偏好。仅适用于当前请求、当前任务或当前材料的临时要求、执行参数和一次性需求不属于偏好。偏好是否可复用取决于用户表达的适用范围，而不是其在对话中出现的次数。
+- 当用户针对同一主题或事件修改或更新其偏好时，提取偏好变化的完整演变过程，包括原始偏好和更新后的偏好。
+- 当用户对 Agent 或 Assistant 的内容明确表达可复用的认可、拒绝或选择时，仅将用户自己的表态作为偏好证据。
+
+来源判断：
+- 输入可能是对话记录，或用户与 Agent 的交互记录。
+- 仅从能够明确归因于用户本人表达的内容中提取偏好。
+- 忽略 Agent 或 Assistant 的输出，以及 Agent 执行过程中注入、召回或生成的上下文，例如历史记忆、工具调用及其返回结果。即使这些内容被包装在 user 消息中，也不得视为用户本人发言。
+- 无法可靠确认内容来源时，不要据此提取偏好。
 
 要求：
-1. 只保留用户明确提到且可合理复用于当前轮次之外的偏好，不要推断或假设。如果用户提到了偏好的原因，也要包含这些原因。
-2. 输出应该是一个条目列表，包含简洁的自然语言摘要和相应的上下文摘要。上下文摘要应保留用户偏好的证据，不要把仅来自助手的内容改写成用户偏好。
-3. 如果在同一主题或领域内提到了多个偏好，你必须将它们合并为一个条目，保持每个条目信息完整。不同话题的偏好要分为多个条目。
-4. 如果没有可以合理提取的显式偏好，返回[]。
+1. 不要推断或假设用户未明确表达的偏好。如果用户说明了偏好的原因，也要包含该原因。
+2. 输出一个由简洁偏好摘要及相应上下文摘要组成的列表。上下文摘要必须保留来自用户的完整证据，不得把非用户内容改写成用户偏好。
+3. 同一主题或领域内的多个偏好必须合并为一个完整条目；不同主题的偏好应分别输出。
+4. 如果没有可以合理提取的显式偏好，返回 `[]`。
 
-对话：
+输入：
 {qa_pair}
 
 找出所有显式偏好。如果没有找到显式偏好，返回[]。仅输出JSON：
@@ -74,8 +86,9 @@ You are a preference inference assistant. Please extract **implicit preferences*
 
 Notes:
 - Implicit preferences are rare. They should describe the user's reusable personal tendency, constraint, or choice, not the assistant's recommendation or a temporary task need.
-- Expressions limited to the current moment or task, such as "now", "today", "this time", "this document", "this task", or "current", are weak evidence for implicit preferences. Treat them as one-off needs unless there is additional user-side evidence of a recurring and reusable pattern.
-- For Assistant's responses or suggestions, they can only be extracted as the user's implicit preferences if the user later provides clear positive evidence, such as adoption, agreement, or action based on the suggestion. Silence, no objection, no follow-up challenge, or simply continuing the conversation is not acceptance.
+- Extract only preferences that can reasonably be reused in future interactions. Temporary requirements, execution parameters, and one-off needs that apply only to the current request, task, or material are not preferences. For implicit preferences, reusable scope alone is not sufficient; there must also be user-side evidence of a recurring and stable pattern, decision, or explicit acceptance.
+- The input may be a conversation or a record of interactions between a user and an Agent. Use only evidence that can be clearly attributed to the user personally. Ignore Agent or Assistant output and any context injected, retrieved, or generated during Agent execution, such as historical memories, tool calls, and tool results. Such content is not user evidence, even if it is wrapped in a user message. If its source cannot be determined reliably, do not use it.
+- For Assistant's responses or suggestions, use only the user's subsequent response as preference evidence when the user provides clear positive evidence, such as adoption, agreement, or action based on the suggestion. Do not use the Assistant content itself as evidence. Silence, no objection, no follow-up challenge, or simply continuing the conversation is not acceptance.
 - Do not infer implicit preferences from assistant-only safety warnings, factual explanations, tool/search suggestions, or general advice. These may be useful facts, but they are not user preferences without user-side evidence.
 - For conversations with only one question-answer turn (single Q&A), implicit preferences cannot be extracted due to insufficient context and behavioral patterns. Implicit preferences require observation of recurring patterns or subsequent behaviors across multiple conversation turns.
 
@@ -138,8 +151,9 @@ NAIVE_IMPLICIT_PREFERENCE_EXTRACT_PROMPT_ZH = """
 
 注意事项：
 - 隐式偏好应谨慎提取。它应描述用户可复用的个人倾向、约束或选择，而不是助手的建议或一次性的任务需求。
-- “现在、今天、这次、这份、本次、当前”等限定在当前轮次或当前任务的表达，对隐式偏好来说只是弱证据。除非还有额外用户侧证据显示重复、稳定、可复用的模式，否则视为一次性需求。
-- 对于Assistant的回答内容或建议，只有在后续对话中用户提供明确的正向证据（如采纳、认同、按建议行动等）时，才能将相关内容提取为用户的隐式偏好。沉默、未反驳、未追问、继续对话本身都不代表接受。
+- 仅提取能够合理复用于后续交互的偏好。仅适用于当前请求、当前任务或当前材料的临时要求、执行参数和一次性需求不属于偏好。对于隐式偏好，仅具备可复用的适用范围仍不足以构成偏好，还必须有用户侧证据表明存在重复且稳定的模式、决策或明确接受。
+- 输入可能是对话记录，或用户与 Agent 的交互记录。仅使用能够明确归因于用户本人表达的内容作为证据。忽略 Agent 或 Assistant 的输出，以及 Agent 执行过程中注入、召回或生成的上下文，例如历史记忆、工具调用及其返回结果。即使这些内容被包装在 user 消息中，也不得视为用户证据。无法可靠确认内容来源时，不要据此推断偏好。
+- 对于 Assistant 的回答或建议，只有用户在后续对话中提供明确的正向证据，例如采纳、认同或按建议行动时，才能将用户自己的后续表态作为偏好证据；不得将 Assistant 的内容本身作为证据。沉默、未反驳、未追问或仅仅继续对话，都不代表接受。
 - 不要从仅由助手给出的安全提醒、事实解释、工具/检索建议或一般建议中推断隐式偏好。这些内容可以是有用事实，但没有用户侧证据时不是用户偏好。
 - 对于只有一轮问答（一问一答）的对话，由于缺乏足够的上下文和行为模式，不能提取隐式偏好。隐式偏好需要从多轮对话中观察到的重复模式或后续行为来推断。
 
@@ -230,6 +244,40 @@ Output only the JSON response, no additional text.
 """
 
 
+NAIVE_JUDGE_DUP_WITH_TEXT_MEM_PROMPT_ZH = """
+你是一个内容比较专家。你的任务是判断每个新的偏好信息是否已经存在于召回的文本记忆中。
+
+**任务：** 对每个新偏好，检查其内容/主题/意图是否已经在任何召回的文本记忆中存在。
+
+**输入结构：**
+- 新偏好：对象数组，每个对象包含"id"和"memory"字段
+- 召回记忆：对象数组，每个对象包含"id"和"memory"字段
+
+**判断标准：**
+- 如果新偏好的核心内容、主题或意图**已经被覆盖**在任何召回的记忆中，标记为"exists"（true）。
+- 考虑语义相似性和主题重叠 - 即使措辞不同，如果含义相同，也算作已存在。
+- 如果新偏好引入了**新信息、不同主题或独特内容**，且在召回记忆中未找到，标记为"exists"（false）。
+- 关注实质性内容，而非细微的表达差异。
+
+**输出格式（JSON）：**
+```json
+{
+  "new_preference_id": "正在评估的新偏好ID",
+  "exists": true/false,
+  "reasoning": "简要说明你的判断理由，引用包含相似内容的召回记忆（如果exists=true）或说明为什么是新内容（如果exists=false）",
+  "matched_memory_id": "如果exists=true，指出匹配的召回记忆id；否则为null"
+}
+```
+**新偏好（数组）：**
+{new_preference}
+
+**召回的文本记忆（数组）：**
+{retrieved_memories}
+
+只输出JSON响应，不要输出其他任何文本。
+"""
+
+
 NAIVE_JUDGE_UPDATE_OR_ADD_PROMPT = """
 You are a content comparison expert. Now you are given old and new information, each containing a question, answer topic name and topic description.
 Please judge whether these two information express the **same question or core content**, regardless of expression differences, details or example differences. The judgment criteria are as follows:
@@ -248,6 +296,28 @@ Please output JSON format:
 {old_information}
 
 **New Information:**
+{new_information}
+"""
+
+
+NAIVE_JUDGE_UPDATE_OR_ADD_PROMPT_ZH = """
+你是一个内容比较专家。现在给你旧信息和新信息，每个信息都包含问题、答案主题名称和主题描述。
+请判断这两个信息是否表达**相同的问题或核心内容**，不考虑表达差异、细节或示例差异。判断标准如下：
+
+- 核心内容一致，即要解决的问题本质、目标或核心概念相同，算作"相同"。
+- 表达方式不同、示例不同，但核心含义一致，也算作"相同"。
+- 如果问题目标、涉及的概念或解决思路不同，则算作"不同"。
+
+请输出JSON格式：
+{
+  "is_same": true/false,
+  "reasoning": "简要解释判断依据，突出核心内容是否一致"
+}
+
+**旧信息：**
+{old_information}
+
+**新信息：**
 {new_information}
 """
 
@@ -286,6 +356,44 @@ You are a preference memory comparison expert. Analyze if the new preference mem
 {new_memory}
 
 **Retrieved preference memories:**
+{retrieved_memories}
+"""
+
+
+NAIVE_JUDGE_UPDATE_OR_ADD_PROMPT_FINE_ZH = """
+你是一个偏好记忆比较专家。通过同时考虑 memory 字段和 preference 字段，分析新的偏好记忆是否与任何召回记忆描述相同的主题。最多只有一个召回记忆可以与新记忆匹配。
+
+**任务：** 比较新的偏好记忆与召回记忆，以确定它们是否讨论相同的主题以及是否需要更新。
+
+**比较标准：**
+- **Memory 字段**：比较所描述的核心主题、场景和上下文
+- **Preference 字段**：比较表达的实际偏好陈述、选择和态度
+- **相同主题**：memory 和 preference 内容都涉及相同的主题
+- **不同主题**：memory 或 preference 内容有显著差异
+- **内容演变**：相同主题但偏好已改变/演变或记忆已更新
+- **内容相同**：memory 和 preference 字段本质上相同
+
+**决策逻辑：**
+- 核心主题相同（memory 和 preference 都相同）= 需要检查是否需要更新
+- 主题不同（memory 或 preference 有差异）= 不需要更新
+- 如果主题相同但内容已改变/演变 = 需要更新
+- 如果主题相同且内容完全相同 = 需要更新
+
+**输出 JSON：**
+```json
+{
+  "need_update": true/false,
+  "id": "正在更新的记忆的ID（如果不需要更新则为空字符串）",
+  "new_memory": "合并/演变后的更新 memory 字段（如果不需要更新则为空字符串）",
+  "new_preference": "合并/演变后的更新 preference 字段（如果不需要更新则为空字符串）",
+  "reasoning": "简要解释比较结果，同时考虑 memory 和 preference 字段"
+}
+```
+
+**新的偏好记忆：**
+{new_memory}
+
+**召回的偏好记忆：**
 {retrieved_memories}
 """
 
@@ -352,6 +460,285 @@ Retrieved preference memories (retrieved_memories):
 - Each operation must include both `preference` and `context_summary` updates where applicable.
 - Each operation must include a clear `reason`.
 - Multiple retrieved memories may be merged into one unified updated memory.
+- Do **not** include any explanatory text outside the JSON.
+"""
+
+
+NAIVE_JUDGE_UPDATE_OR_ADD_PROMPT_OP_TRACE_ZH = """
+# 用户偏好记忆管理代理
+
+你是一个**用户偏好记忆管理代理**。
+你的目标是通过分析新的偏好信息并确定如何更新现有记忆，来维护用户的长期**偏好记忆库**。
+
+每个记忆条目包含三个字段：
+- **id**：记忆的唯一标识符。
+- **context_summary**：从中提取偏好的对话或情境的事实摘要。
+- **preference**：描述用户偏好或倾向的提取陈述。
+
+更新偏好时，你还应该整合并更新相应的 `context_summary`，以确保两个字段保持语义一致。
+
+你必须生成完整的**操作跟踪**，显示应该**添加**、**更新**或**删除**哪些记忆条目（通过唯一 ID 标识）。
+
+## 输入格式
+
+新的偏好记忆 (new_memories):
+{new_memories}
+
+召回的偏好记忆 (retrieved_memories):
+{retrieved_memories}
+## 任务说明
+
+1. 对于每个新记忆，分析其与召回记忆的关系：
+   - 如果新记忆与所有召回记忆**无关** → 执行 `"ADD"`（作为新的独立记忆插入）；
+   - 如果新记忆与一个或多个召回记忆**相关** → 对这些相关的召回记忆执行 `"UPDATE"`（细化、补充或合并 `preference` 和 `context_summary`，同时保留变化历史轨迹信息）；
+   - 如果一个或多个召回记忆被合并到一个更新的记忆中 → 对这些召回记忆执行 `"DELETE"`。
+
+2. **重要**：只有与新记忆相关的召回记忆才应该被更新或删除。与任何新记忆都无关的召回记忆必须保留。
+
+3. 如果多个召回记忆描述相同的偏好主题，将它们合并为一个更新的记忆条目，以连贯简洁的方式结合它们的 `preference` 信息和 `context_summary`。
+
+4. 输出结构化的**操作跟踪**列表，每个操作明确说明：
+   - 受影响的记忆（通过 ID）；
+   - 执行的操作类型；
+   - 更新前后的 `preference` 和 `context_summary`；
+   - 以及决策的原因。
+
+## 输出格式 (JSON)
+
+{
+  "trace": [
+    {
+      "op_id": "op_1",
+      "type": "ADD" | "UPDATE" | "DELETE",
+      "target_id": "（旧记忆 ID；如果是 ADD 则为 null）",
+      "old_preference": "（旧的偏好文本；如果是 ADD 则为 null）",
+      "old_context_summary": "（旧的上下文摘要；如果是 ADD 则为 null）",
+      "new_preference": "（更新或新创建的偏好，如果适用）",
+      "new_context_summary": "（更新或新创建的上下文摘要，如果适用）",
+      "reason": "（决策的简要自然语言解释）"
+    }
+  ]
+}
+
+## 输出要求
+
+- 输出**必须**是有效的 JSON。
+- 每个操作必须包含 `preference` 和 `context_summary` 的更新（如果适用）。
+- 每个操作必须包含清晰的 `reason`。
+- 多个召回记忆可以合并为一个统一的更新记忆。
+- **不要**在 JSON 之外包含任何解释性文本。
+"""
+
+
+NAIVE_JUDGE_UPDATE_OR_ADD_PROMPT_OP_TRACE_WITH_ONE_SHOT = """
+# User Preference Memory Management Agent
+
+You are a **User Preference Memory Management Agent**.
+Your goal is to maintain a user's long-term **preference memory base** by analyzing new preference information and determining how it should update existing memories.
+
+Each memory entry contains three fields:
+- **id**: a unique identifier for the memory.
+- **context_summary**: a factual summary of the dialogue or situation from which the preference was extracted.
+- **preference**: the extracted statement describing the user's preference or tendency.
+
+When updating a preference, you should also integrate and update the corresponding `context_summary` to ensure both fields stay semantically consistent.
+
+You must produce a complete **operation trace**, showing which memory entries (identified by unique IDs) should be **added**, **updated**, or **deleted**, and then output the **final memory state** after all operations.
+
+## Input Format
+
+New preference memories (new_memories):
+{new_memories}
+
+Retrieved preference memories (retrieved_memories):
+{retrieved_memories}
+## Task Instructions
+
+1. For each new memory, analyze its relationship with the retrieved memories:
+   - If a new memory is **unrelated** to all retrieved memories → perform `"ADD"` (insert as a new independent memory);
+   - If a new memory is **related** to one or more retrieved memories → perform `"UPDATE"` on those related retrieved memories (refine, supplement, or merge both the `preference` and the `context_summary`, while preserving change history trajectory information);
+   - If one or more retrieved memories are merged into one updated memory → perform `"DELETE"` on those retrieved memories.
+
+2. **Important**: Only retrieved memories that are related to the new memories should be updated or deleted. Retrieved memories that are unrelated to any new memory must be preserved as-is in the final state.
+
+3. If multiple retrieved memories describe the same preference theme, merge them into one updated memory entry, combining both their `preference` information and their `context_summary` in a coherent and concise way.
+
+4. Output a structured list of **operation traces**, each explicitly stating:
+   - which memory (by ID) is affected,
+   - what operation is performed,
+   - the before/after `preference` and `context_summary`,
+   - and the reasoning behind it.
+
+5. Output the **final memory state (after_update_state)**, representing the complete preference memory base after applying all operations. This must include:
+   - All newly added memories (from ADD operations)
+   - All updated memories (from UPDATE operations)
+   - All unrelated retrieved memories that were preserved unchanged
+
+## Output Format (JSON)
+
+{
+  "trace": [
+    {
+      "op_id": "op_1",
+      "type": "ADD" | "UPDATE" | "DELETE",
+      "target_id": "(the old memory ID; null if ADD)",
+      "old_preference": "(the old preference text; null if ADD)",
+      "old_context_summary": "(the old context summary; null if ADD)",
+      "new_preference": "(the updated or newly created preference, if applicable)",
+      "new_context_summary": "(the updated or newly created context summary, if applicable)",
+      "reason": "(brief natural-language explanation for the decision)"
+    }
+  ],
+  "after_update_state": [
+    {
+      "id": "id1",
+      "context_summary": "updated factual summary of the context",
+      "preference": "updated or final preference text"
+    }
+  ]
+}
+
+## Example
+
+**Input:**
+new_memories:
+[
+  {
+    "id": "new_id1",
+    "context_summary": "During a recent chat about study habits, the user mentioned that he often studies in quiet coffee shops and has started preferring lattes over Americanos, which he only drinks occasionally.",
+    "preference": "User now prefers lattes but occasionally drinks Americanos; he also enjoys studying in quiet coffee shops."
+  },
+  {
+    "id": "new_id2",
+    "context_summary": "The user mentioned in a conversation about beverages that he has recently started enjoying green tea in the morning.",
+    "preference": "User now enjoys drinking green tea in the morning."
+  },
+  {
+    "id": "new_id3",
+    "context_summary": "The user shared that he has recently started learning to play the guitar and practices for about 30 minutes every evening.",
+    "preference": "User enjoys playing guitar and practices regularly in the evenings."
+  }
+]
+
+retrieved_memories:
+[
+  {
+    "id": "id1",
+    "context_summary": "The user previously said he likes coffee in general.",
+    "preference": "User likes coffee."
+  },
+  {
+    "id": "id2",
+    "context_summary": "The user once mentioned preferring Americanos during work breaks.",
+    "preference": "User prefers Americanos."
+  },
+  {
+    "id": "id3",
+    "context_summary": "The user said he often works from home",
+    "preference": "User likes working from home."
+  },
+  {
+    "id": "id4",
+    "context_summary": "The user noted he doesn't drink tea very often.",
+    "preference": "User has no particular interest in tea."
+  },
+  {
+    "id": "id5",
+    "context_summary": "The user mentioned he enjoys running in the park on weekends.",
+    "preference": "User likes running outdoors on weekends."
+  }
+]
+
+**Output:**
+{
+  "trace": [
+    {
+      "op_id": "op_1",
+      "type": "UPDATE",
+      "target_id": "id1",
+      "old_preference": "User likes coffee.",
+      "old_context_summary": "The user previously said he likes coffee in general.",
+      "new_preference": "User likes coffee, especially lattes, but occasionally drinks Americanos.",
+      "new_context_summary": "The user discussed his coffee habits, stating he now prefers lattes but only occasionally drinks Americanos",
+      "reason": "New memory new_id1 refines and expands the coffee preference and context while preserving frequency semantics ('occasionally')."
+    },
+    {
+      "op_id": "op_2",
+      "type": "DELETE",
+      "target_id": "id2",
+      "old_preference": "User prefers Americanos.",
+      "old_context_summary": "The user once mentioned preferring Americanos during work breaks.",
+      "new_preference": null,
+      "new_context_summary": null,
+      "reason": "This old memory is now merged into the updated coffee preference (id1)."
+    },
+    {
+      "op_id": "op_3",
+      "type": "UPDATE",
+      "target_id": "id3",
+      "old_preference": "User likes working from home.",
+      "old_context_summary": "The user said he often works from home.",
+      "new_preference": "User now prefers studying in quiet coffee shops instead of working from home.",
+      "new_context_summary": "The user mentioned shifting from working at home to studying in quiet cafes, reflecting a new preferred environment.",
+      "reason": "New memory new_id1 indicates a preference change for the working environment."
+    },
+    {
+      "op_id": "op_4",
+      "type": "UPDATE",
+      "target_id": "id4",
+      "old_preference": "User has no particular interest in tea.",
+      "old_context_summary": "The user noted he doesn't drink tea very often.",
+      "new_preference": "The user does not drink tea very often before, but now enjoys drinking green tea in the morning.",
+      "new_context_summary": "The user mentioned that he has recently started enjoying green tea in the morning.",
+      "reason": "New memory new_id2 indicates a preference change for tea consumption."
+    },
+    {
+      "op_id": "op_5",
+      "type": "ADD",
+      "target_id": "new_id3",
+      "old_preference": null,
+      "old_context_summary": null,
+      "new_preference": "User enjoys playing guitar and practices regularly in the evenings.",
+      "new_context_summary": "The user shared that he has recently started learning to play the guitar and practices for about 30 minutes every evening.",
+      "reason": "This is a completely new preference unrelated to any existing memories, so it should be added as a new entry."
+    }
+  ],
+  "after_update_state": [
+    {
+      "id": "id1",
+      "context_summary": "The user discussed his coffee habits, saying he now prefers lattes but only occasionally drinks Americanos.",
+      "preference": "User likes coffee, especially lattes, but occasionally drinks Americanos."
+    },
+    {
+      "id": "id3",
+      "context_summary": "The user mentioned shifting from working at home to studying in quiet cafes, reflecting a new preferred environment.",
+      "preference": "User now prefers studying in quiet coffee shops instead of working from home."
+    },
+    {
+      "id": "id4",
+      "context_summary": "The user mentioned that he has recently started enjoying green tea in the morning.",
+      "preference": "The user does not drink tea very often before, but now enjoys drinking green tea in the morning."
+    },
+    {
+      "id": "id5",
+      "context_summary": "The user mentioned he enjoys running in the park on weekends.",
+      "preference": "User likes running outdoors on weekends."
+    },
+    {
+      "id": "new_id3",
+      "context_summary": "The user shared that he has recently started learning to play the guitar and practices for about 30 minutes every evening.",
+      "preference": "User enjoys playing guitar and practices regularly in the evenings."
+    }
+  ]
+}
+
+## Output Requirements
+
+- The output **must** be valid JSON.
+- Each operation must include both `preference` and `context_summary` updates where applicable.
+- Each operation must include a clear `reason`.
+- Multiple retrieved memories may be merged into one unified updated memory.
+- `after_update_state` must reflect the final, post-update state of the preference memory base.
 - Do **not** include any explanatory text outside the JSON.
 """
 

@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import traceback
 
@@ -155,6 +156,16 @@ class GraphStructureReorganizer:
         Use schedule library to periodically trigger structure optimization.
         This runs until the stop flag is set.
         """
+        # ⚠️ 2026-10-20 停用：一轮重组会把该租户的全部候选节点读进内存、4 线程并发写图，
+        # 实测把 Neo4j 的堆打爆（OutOfMemoryError -> Database panic，整库拒绝事务）。
+        # 默认关；要恢复就设 MEMOS_REORGANIZE_DISABLED=0 并重启 API。
+        if os.getenv("MEMOS_REORGANIZE_DISABLED", "1") != "0":
+            logger.info(
+                "[Reorganizer] structure optimizer disabled "
+                "(MEMOS_REORGANIZE_DISABLED); no periodic reorganization will run."
+            )
+            return
+
         import schedule
 
         schedule.every(100).seconds.do(self.optimize_structure, scope="LongTermMemory")
@@ -238,12 +249,18 @@ class GraphStructureReorganizer:
             )
             if detected_relationships:
                 for node_a, existing_node, relation in detected_relationships:
-                    self.resolver.resolve(
+                    # resolve 返回被并入对方、已归档的节点 id。谁是 head 由时间决定：
+                    # 补录的旧对话写得晚、说得早，此时被归档的是新写入的节点自己。
+                    archived_id = self.resolver.resolve(
                         node_a, existing_node, relation, user_name=message.user_name
                     )
+                    if archived_id is None:
+                        continue
                     # 被并掉的一方不再作为后续判重的主体：就地合并以"较新一方"为 keeper，
                     # 若再拿已归档节点去判重，会把它重新提升成 keeper，来回翻转。
-                    merged_away.add(existing_node.id)
+                    merged_away.add(archived_id)
+                    if archived_id == added_node.id:
+                        break
 
         self._reorganize_needed = True
 
@@ -706,16 +723,24 @@ class GraphStructureReorganizer:
     def _convert_id_to_node(self, message: QueueMessage) -> QueueMessage:
         """
         Convert IDs in the message.after_node to GraphDBNode objects.
+
+        Builds a NEW list instead of writing into ``message.after_node`` in place:
+        callers hand us a list they may still be holding (``MemoryManager.add``
+        passes the ids it is about to return), and in-place replacement would put
+        GraphDBNode objects into that list from another thread.
         """
-        for i, node in enumerate(message.after_node or []):
+        converted: list[GraphDBNode | None] = []
+        for node in message.after_node or []:
             if not isinstance(node, str):
+                converted.append(node)
                 continue
             raw_node = self.graph_store.get_node(
                 node, include_embedding=True, user_name=message.user_name
             )
             if raw_node is None:
                 logger.debug(f"Node with ID {node} not found in the graph store.")
-                message.after_node[i] = None
+                converted.append(None)
             else:
-                message.after_node[i] = GraphDBNode(**raw_node)
+                converted.append(GraphDBNode(**raw_node))
+        message.after_node = converted
         return message

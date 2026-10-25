@@ -1,12 +1,13 @@
 import copy
 import json
 import os
+import re
 import shutil
 import uuid
 import zipfile
 
 from concurrent.futures import as_completed
-from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,13 +18,17 @@ from memos.dependency import require_python_package
 from memos.embedders.base import BaseEmbedder
 from memos.graph_dbs.base import BaseGraphDB
 from memos.llms.base import BaseLLM
-from memos.log import get_logger
+from memos.log import get_logger, text_hash
+from memos.mem_reader.custom_extract import apply_custom_extract_prompt
 from memos.mem_reader.read_multi_modal import detect_lang
+from memos.mem_reader.read_skill_memory import skill_store
 from memos.memories.textual.item import (
+    ArchivedTextualMemory,
     SourceMessage,
     TextualMemoryItem,
     TreeNodeTextualMemoryMetadata,
 )
+from memos.memories.textual.tree_text_memory.organize import versioning
 from memos.memories.textual.tree_text_memory.retrieve.searcher import Searcher
 from memos.templates.skill_mem_prompt import (
     OTHERS_GENERATION_PROMPT,
@@ -40,7 +45,7 @@ from memos.templates.skill_mem_prompt import (
     TOOL_GENERATION_PROMPT,
 )
 from memos.types import MessageList
-from memos.utils import timed
+from memos.utils import timed, utc_now_iso
 
 
 load_dotenv()
@@ -406,9 +411,12 @@ def _extract_skill_memory_by_llm(
         .replace("{messages}", messages_context)
         .replace("{chat_history}", chat_history_context)
     )
+    prompt_content = apply_custom_extract_prompt(prompt_content, "skill")
 
     prompt = [{"role": "user", "content": prompt_content}]
-    logger.info(f"[Skill Memory]: Prompt {prompt_content}")
+    logger.info(
+        f"[Skill Memory]: Prompt chars={len(prompt_content)} hash={text_hash(prompt_content)}"
+    )
 
     # Call LLM to extract skill memory with retry logic
     for attempt in range(3):
@@ -534,9 +542,13 @@ def _extract_skill_memory_by_llm_md(
         .replace("{messages}", messages_context)
         .replace("{chat_history}", chat_history_context)
     )
+    prompt_content = apply_custom_extract_prompt(prompt_content, "skill")
 
     prompt = [{"role": "user", "content": prompt_content}]
-    logger.info(f"[Skill Memory]: _extract_skill_memory_by_llm_md: Prompt {prompt_content}")
+    logger.info(
+        "[Skill Memory]: _extract_skill_memory_by_llm_md: Prompt "
+        f"chars={len(prompt_content)} hash={text_hash(prompt_content)}"
+    )
 
     # Call LLM to extract skill memory with retry logic
     for attempt in range(3):
@@ -646,92 +658,98 @@ def _rewrite_query(task_type: str, messages: MessageList, llm: BaseLLM, rewrite_
         return messages[0]["content"] if messages else ""
 
 
-@require_python_package(
-    import_name="alibabacloud_oss_v2",
-    install_command="pip install alibabacloud-oss-v2",
-)
 def _upload_skills(
     skills_repo_backend: str,
-    skills_oss_dir: dict[str, Any] | None,
+    skills_oss_dir: str | None,
     local_tmp_file_path: str,
     local_save_file_path: str,
     client: Any,
     user_id: str,
+    skills_dir_config: dict[str, Any] | None = None,
 ) -> str:
-    if skills_repo_backend == "OSS":
-        zip_filename = Path(local_tmp_file_path).name
-        oss_path = (Path(skills_oss_dir) / user_id / zip_filename).as_posix()
-
-        import alibabacloud_oss_v2 as oss
-
-        result = client.put_object_from_file(
-            request=oss.PutObjectRequest(
-                bucket=os.getenv("OSS_BUCKET_NAME"),
-                key=oss_path,
-            ),
-            filepath=local_tmp_file_path,
-        )
-
-        if result.status_code != 200:
-            logger.warning("[PROCESS_SKILLS] Failed to upload skill to OSS")
-            return ""
-
-        # Construct and return the URL
-        bucket_name = os.getenv("OSS_BUCKET_NAME")
-        endpoint = os.getenv("OSS_ENDPOINT").replace("https://", "").replace("http://", "")
-        url = f"https://{bucket_name}.{endpoint}/{oss_path}"
-        return url
-    else:
-        import sys
-
-        args = sys.argv
-        port = (
-            int(args[args.index("--port") + 1])
-            if "--port" in args and args.index("--port") + 1 < len(args)
-            else "8000"
-        )
-
-        zip_path = str(local_tmp_file_path)
-        os.makedirs(local_save_file_path, exist_ok=True)
-        file_name = os.path.basename(zip_path)
-        target_full_path = os.path.join(local_save_file_path, file_name)
-        shutil.copy2(zip_path, target_full_path)
-        return f"http://localhost:{port}/download/{file_name}"
+    config = {"skills_local_dir": local_save_file_path, "skills_oss_dir": skills_oss_dir or ""}
+    config.update(skills_dir_config or {})
+    return skill_store.publish_skill(
+        Path(local_tmp_file_path),
+        user_id,
+        backend=skills_repo_backend,
+        skills_dir_config=config,
+        oss_client=client,
+    )
 
 
-@require_python_package(
-    import_name="alibabacloud_oss_v2",
-    install_command="pip install alibabacloud-oss-v2",
-)
-def _delete_skills(
+def _cleanup_skill_tmp_files(zip_path: str) -> None:
+    try:
+        zip_file = Path(zip_path)
+        skill_dir = zip_file.parent / zip_file.stem
+        zip_file.unlink(missing_ok=True)
+        if skill_dir.exists():
+            shutil.rmtree(skill_dir)
+        logger.info(f"[PROCESS_SKILLS] Cleaned up local files: {zip_path} and {skill_dir}")
+    except Exception as cleanup_error:
+        logger.warning(f"[PROCESS_SKILLS] Error cleaning up local files: {cleanup_error}")
+
+
+def _delete_zip(
+    url: str | None,
+    *,
     skills_repo_backend: str,
-    zip_filename: str,
-    client: Any,
-    skills_oss_dir: dict[str, Any] | None,
-    local_save_file_path: str,
+    oss_client: Any,
+    skills_dir_config: dict[str, Any],
     user_id: str,
-) -> Any:
-    if skills_repo_backend == "OSS":
-        old_path = (Path(skills_oss_dir) / user_id / zip_filename).as_posix()
-        import alibabacloud_oss_v2 as oss
-
-        return client.delete_object(
-            oss.DeleteObjectRequest(
-                bucket=os.getenv("OSS_BUCKET_NAME"),
-                key=old_path,
-            )
+) -> None:
+    if not url:
+        return
+    try:
+        skill_store.delete_skill_by_url(
+            url,
+            user_id,
+            backend=skills_repo_backend,
+            skills_dir_config=skills_dir_config,
+            oss_client=oss_client,
         )
-    else:
-        target_full_path = os.path.join(local_save_file_path, zip_filename)
-        target_path = Path(target_full_path)
+    except Exception as e:
+        logger.warning(
+            f"[PROCESS_SKILLS] Failed to delete skill file from {skills_repo_backend}: {e}"
+        )
+
+
+def _publish_skill(
+    skill_memory: dict[str, Any],
+    zip_path: str,
+    *,
+    skills_repo_backend: str,
+    oss_client: Any,
+    skills_dir_config: dict[str, Any],
+    user_id: str,
+) -> bool:
+    """Upload the new zip. Returns False when an update must be dropped.
+
+    The previous zip of an updated skill is not touched here: it goes only once the new item
+    exists (see ``process_skill_memory``), so a failure on the way leaves the old version intact.
+    """
+    is_update = bool(skill_memory.get("update", False) and skill_memory.get("old_memory_id"))
+    try:
         try:
-            if target_path.is_file():
-                target_path.unlink()
-                logger.info(f"Local file {target_path} successfully deleted")
-            else:
-                logger.info(f"Local file {target_path} does not exist, no need to delete")
+            url = _upload_skills(
+                skills_repo_backend=skills_repo_backend,
+                skills_oss_dir=skills_dir_config["skills_oss_dir"],
+                local_tmp_file_path=zip_path,
+                local_save_file_path=skills_dir_config["skills_local_dir"],
+                client=oss_client,
+                user_id=user_id,
+                skills_dir_config=skills_dir_config,
+            )
         except Exception as e:
-            logger.warning(f"Error deleting local file: {e}")
+            logger.warning(f"[PROCESS_SKILLS] Error uploading skill to {skills_repo_backend}: {e}")
+            url = ""
+        if is_update and not url:
+            return False
+        skill_memory["url"] = url
+        logger.info(f"[PROCESS_SKILLS] Uploaded skill to {skills_repo_backend}: {url}")
+        return True
+    finally:
+        _cleanup_skill_tmp_files(zip_path)
 
 
 @timed
@@ -739,14 +757,16 @@ def _write_skills_to_file(
     skill_memory: dict[str, Any], info: dict[str, Any], skills_dir_config: dict[str, Any]
 ) -> str:
     user_id = info.get("user_id", "unknown")
-    skill_name = skill_memory.get("name", "unnamed_skill").replace(" ", "_").lower()
+    raw_name = skill_memory.get("name") or "unnamed_skill"
+    skill_name = re.sub(r"\s+", "_", str(raw_name).strip()).lower()
+    # Filesystem names never come from the raw skill name or user id, and every write is unique.
+    zip_stem = skill_store.unique_zip_stem(raw_name)
+    folder_name = skill_store.skill_slug(raw_name)
 
-    # Create tmp directory for user if it doesn't exist
-    tmp_dir = Path(skills_dir_config["skills_local_tmp_dir"]) / user_id
+    tmp_dir = Path(skills_dir_config["skills_local_tmp_dir"]) / skill_store.user_dir_name(user_id)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create skill directory directly in tmp_dir
-    skill_dir = tmp_dir / skill_name
+    skill_dir = tmp_dir / zip_stem
     skill_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate SKILL.md content with frontmatter
@@ -834,10 +854,10 @@ description: {skill_memory.get("description", "")}
     # Write separate markdown files from others
     if others and isinstance(others, dict):
         for key, value in others.items():
-            if key.endswith(".md"):
+            if key.endswith(".md") and Path(key).name not in {"", ".", ".."}:
                 md_file_dir = skill_dir / "reference"
                 md_file_dir.mkdir(parents=True, exist_ok=True)
-                md_file_path = md_file_dir / key
+                md_file_path = md_file_dir / Path(key).name
                 with open(md_file_path, "w", encoding="utf-8") as f:
                     f.write(value)
 
@@ -852,20 +872,22 @@ description: {skill_memory.get("description", "")}
             if not script_filename.endswith(".py"):
                 script_filename = f"{script_filename}.py"
 
+            script_filename = Path(script_filename).name
+            if script_filename in {"", ".", ".."}:
+                continue
             script_path = scripts_dir / script_filename
             with open(script_path, "w", encoding="utf-8") as f:
                 f.write(script_content)
 
     # Create zip file in tmp_dir
-    zip_filename = f"{skill_name}.zip"
-    zip_path = tmp_dir / zip_filename
+    zip_path = tmp_dir / f"{zip_stem}.zip"
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
         # Walk through the skill directory and add all files
         for file_path in skill_dir.rglob("*"):
             if file_path.is_file():
                 # Use relative path from skill_dir for archive
-                arcname = Path(skill_dir.name) / file_path.relative_to(skill_dir)
+                arcname = Path(folder_name) / file_path.relative_to(skill_dir)
                 zipf.write(str(file_path), str(arcname))
 
     logger.info(f"[PROCESS_SKILLS] Created skill zip file: {zip_path}")
@@ -890,6 +912,10 @@ def create_skill_memory_item(
 
     # Use description as the memory content
     memory_content = skill_memory.get("description", "")
+    embed_text = memory_content
+    if skill_memory.get("skill_source") == "user_upload":
+        # Uploaded descriptions are author-written and often terse; the name carries intent too.
+        embed_text = "\n".join(part for part in (skill_memory.get("name"), memory_content) if part)
 
     # Create metadata with all skill-specific fields directly
     metadata = TreeNodeTextualMemoryMetadata(
@@ -903,11 +929,11 @@ def create_skill_memory_item(
         usage=[],
         background="",
         confidence=0.99,
-        created_at=datetime.now().isoformat(),
-        updated_at=datetime.now().isoformat(),
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
         type="skills",
         info=info_,
-        embedding=embedder.embed([memory_content])[0] if embedder else None,
+        embedding=embedder.embed([embed_text])[0] if embedder else None,
         # Skill-specific fields
         name=skill_memory.get("name", ""),
         description=skill_memory.get("description", ""),
@@ -933,6 +959,18 @@ def create_skill_memory_item(
         item_id = str(uuid.uuid4())
 
     return TextualMemoryItem(id=item_id, memory=memory_content, metadata=metadata)
+
+
+def carry_over_history(item: TextualMemoryItem, previous: TextualMemoryItem) -> None:
+    """Record the replaced skill's description as a version of ``item``, which reuses its id.
+
+    ``item`` overwrites the old node when it is written, so the old description would otherwise
+    be lost. The zip of the old version is not kept.
+    """
+    fields = versioning.merge_into_head(item, previous, update_type="update")
+    item.metadata.history = [ArchivedTextualMemory(**json.loads(e)) for e in fields["history"]]
+    item.metadata.version = fields["version"]
+    item.metadata.valid_from = fields["valid_from"]
 
 
 def _skill_init(skills_repo_backend, oss_config, skills_dir_config):
@@ -970,15 +1008,37 @@ def _skill_init(skills_repo_backend, oss_config, skills_dir_config):
 
 def _get_skill_file_storage_location() -> str:
     # SKILLS_REPO_BACKEND: Skill file storage location OSS/LOCAL
-    allowed_backends = {"OSS", "LOCAL"}
-    raw_backend = os.getenv("SKILLS_REPO_BACKEND")
-    if raw_backend in allowed_backends:
-        return raw_backend
-    else:
+    return skill_store.storage_backend()
+
+
+def _get_skill_min_tool_rounds() -> int:
+    """Minimum number of tool-call rounds required before skill extraction.
+
+    The historical value was a hard-coded 5, which never triggered for batch
+    judgement workloads that do not send ``role: tool`` messages. Deployments
+    can lower it with ``SKILL_MIN_TOOL_ROUNDS`` (0 disables the gate).
+    """
+    default = 5
+    raw = os.getenv("SKILL_MIN_TOOL_ROUNDS")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
         logger.warning(
-            "Environment variable [SKILLS_REPO_BACKEND] is invalid, using LOCAL to store skill",
+            "Environment variable [SKILL_MIN_TOOL_ROUNDS]=%r is not an integer, using %d",
+            raw,
+            default,
         )
-        return "LOCAL"
+        return default
+    if value < 0:
+        logger.warning(
+            "Environment variable [SKILL_MIN_TOOL_ROUNDS]=%r must be >= 0, using %d",
+            raw,
+            default,
+        )
+        return default
+    return value
 
 
 @timed
@@ -1023,8 +1083,11 @@ def process_skill_memory_fine(
 
     messages = _reconstruct_messages_from_memory_items(fast_memory_items)
     tool_rounds = sum(1 for message in messages if message.get("role") == "tool")
-    if tool_rounds < 5:
-        logger.info(f"[PROCESS_SKILLS] Skip skill extraction: tool rounds {tool_rounds} < 5")
+    min_tool_rounds = _get_skill_min_tool_rounds()
+    if tool_rounds < min_tool_rounds:
+        logger.info(
+            f"[PROCESS_SKILLS] Skip skill extraction: tool rounds {tool_rounds} < {min_tool_rounds}"
+        )
         return []
 
     chat_history, messages = _preprocess_extract_messages(chat_history, messages)
@@ -1145,79 +1208,27 @@ def process_skill_memory_fine(
         all_related_memories.extend(memories)
     old_memories_map = {mem.id: mem for mem in all_related_memories}
 
-    # upload skills to oss and set urls directly to skill_memory
+    # Publish each new zip; the zip of a replaced version goes after its new item exists.
     user_id = info.get("user_id", "unknown")
-
+    published_ids = set()
     for skill_memory, zip_path in skill_memory_with_paths:
-        try:
-            # Delete old skill from OSS if this is an update
-            if skill_memory.get("update", False) and skill_memory.get("old_memory_id"):
-                old_memory_id = skill_memory["old_memory_id"]
-                old_memory = old_memories_map.get(old_memory_id)
+        if _publish_skill(
+            skill_memory,
+            zip_path,
+            skills_repo_backend=skills_repo_backend,
+            oss_client=oss_client,
+            skills_dir_config=skills_dir_config,
+            user_id=user_id,
+        ):
+            published_ids.add(id(skill_memory))
 
-                if old_memory:
-                    # Get old path from the old memory's metadata
-                    old_path = getattr(old_memory.metadata, "url", None)
-
-                    if old_path:
-                        try:
-                            # delete old skill from OSS
-                            zip_filename = Path(old_path).name
-                            _delete_skills(
-                                skills_repo_backend=skills_repo_backend,
-                                zip_filename=zip_filename,
-                                client=oss_client,
-                                skills_oss_dir=skills_dir_config["skills_oss_dir"],
-                                local_save_file_path=skills_dir_config["skills_local_dir"],
-                                user_id=user_id,
-                            )
-                            logger.info(
-                                f"[PROCESS_SKILLS] Deleted old skill from {skills_repo_backend}: {old_path}"
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                f"[PROCESS_SKILLS] Failed to delete old skill from {skills_repo_backend}: {e}"
-                            )
-
-                    # delete old skill from graph db
-                    if graph_db:
-                        graph_db.delete_node_by_prams(memory_ids=[old_memory_id])
-                        logger.info(
-                            f"[PROCESS_SKILLS] Deleted old skill from graph db: {old_memory_id}"
-                        )
-
-            # Upload new skill
-            # Use the same filename as the local zip file
-            url = _upload_skills(
-                skills_repo_backend=skills_repo_backend,
-                skills_oss_dir=skills_dir_config["skills_oss_dir"],
-                local_tmp_file_path=zip_path,
-                local_save_file_path=skills_dir_config["skills_local_dir"],
-                client=oss_client,
-                user_id=user_id,
-            )
-
-            # Set URL directly to skill_memory
-            skill_memory["url"] = url
-
-            logger.info(f"[PROCESS_SKILLS] Uploaded skill to {skills_repo_backend}: {url}")
-        except Exception as e:
-            logger.warning(f"[PROCESS_SKILLS] Error uploading skill to {skills_repo_backend}: {e}")
-            skill_memory["url"] = ""  # Set to empty string if upload fails
-        finally:
-            # Clean up local files after upload
-            try:
-                zip_file = Path(zip_path)
-                skill_dir = zip_file.parent / zip_file.stem
-                # Delete zip file
-                if zip_file.exists():
-                    zip_file.unlink()
-                # Delete skill directory
-                if skill_dir.exists():
-                    shutil.rmtree(skill_dir)
-                logger.info(f"[PROCESS_SKILLS] Cleaned up local files: {zip_path} and {skill_dir}")
-            except Exception as cleanup_error:
-                logger.warning(f"[PROCESS_SKILLS] Error cleaning up local files: {cleanup_error}")
+    # An update that could not be published must not overwrite the node of the previous version.
+    skill_memories = [
+        skill_memory
+        for skill_memory in skill_memories
+        if not (skill_memory.get("update", False) and skill_memory.get("old_memory_id"))
+        or id(skill_memory) in published_ids
+    ]
 
     # Build source lookup: (role, content) → SourceMessage from fast_memory_items
     source_lookup: dict[tuple[str, str], SourceMessage] = {}
@@ -1227,7 +1238,14 @@ def process_skill_memory_fine(
 
     # Create TextualMemoryItem objects
     skill_memory_items = []
+    zip_args = {
+        "skills_repo_backend": skills_repo_backend,
+        "oss_client": oss_client,
+        "skills_dir_config": skills_dir_config,
+        "user_id": user_id,
+    }
     for skill_memory in skill_memories:
+        previous = None
         try:
             # Match sources precisely via the task chunk messages that produced this skill
             task_type = skill_memory.pop("_task_type", None)
@@ -1246,9 +1264,27 @@ def process_skill_memory_fine(
             memory_item = create_skill_memory_item(
                 skill_memory, info, embedder, sources=skill_sources, **kwargs
             )
-            skill_memory_items.append(memory_item)
+            previous = (
+                old_memories_map.get(skill_memory.get("old_memory_id"))
+                if skill_memory.get("update", False)
+                else None
+            )
+            if previous is not None and previous.id == memory_item.id:
+                carry_over_history(memory_item, previous)
         except Exception as e:
             logger.warning(f"[PROCESS_SKILLS] Error creating skill memory item: {e}")
+            _delete_zip(skill_memory.get("url"), **zip_args)
             continue
+        skill_memory_items.append(memory_item)
+        if memory_item.metadata.url:
+            replaced = previous if previous is not None and previous.id == memory_item.id else None
+            skill_store.defer_file_cleanup(
+                memory_item.id,
+                memory_item.metadata.url,
+                on_stored=partial(_delete_zip, getattr(replaced.metadata, "url", None), **zip_args)
+                if replaced
+                else (lambda: None),
+                on_lost=partial(_delete_zip, memory_item.metadata.url, **zip_args),
+            )
 
     return skill_memory_items

@@ -96,6 +96,39 @@ def test_survives_missing_or_empty_buckets():
     assert SearchHandler._drop_inactive({"text_mem": None}) == {"text_mem": None}
 
 
+def test_dream_bucket_is_exempt():
+    """dream_mem 的终态就是 completed（或 context_only / skipped），不是"被归档"。
+
+    这里按 activated 过滤会把整个桶清空——那正是这两类此前一条都召回不到的原因之一。
+    """
+    results = {
+        "text_mem": [
+            {
+                "cube_id": "tenant-b",
+                "memories": [_mem("t-keep", "activated")],
+                "total_nodes": 1,
+            }
+        ],
+        "dream_mem": [
+            {
+                "cube_id": "tenant-b",
+                "memories": [
+                    _mem("d-completed", "completed", "DreamDiary"),
+                    _mem("i-context", "context_only", "InsightMemory"),
+                    _mem("d-deleted", "deleted", "DreamDiary"),
+                ],
+                "total_nodes": 3,
+            }
+        ],
+    }
+
+    out = SearchHandler._drop_inactive(results)
+
+    assert _ids(out, "text_mem") == ["t-keep"]
+    assert _ids(out, "dream_mem") == ["d-completed", "i-context", "d-deleted"]
+    assert out["dream_mem"][0]["total_nodes"] == 3
+
+
 def test_context_hits_echo_their_status():
     """Context 命中走的是另一套 metadata 组装（`memos.dream.search._format_context_hit`），
     原先不回填 status，于是出栈过滤会把它整类误杀——它和图里的 Context 节点一样是 activated。"""

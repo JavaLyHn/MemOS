@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from memos.embedders.base import BaseEmbedder
 from memos.llms.base import BaseLLM
 from memos.log import get_logger
+from memos.mem_reader.custom_extract import apply_custom_extract_prompt
 from memos.memories.textual.item import (
     SourceMessage,
     TextualMemoryItem,
@@ -212,6 +213,7 @@ class ImageParser(BaseMessageParser):
 
         # Inject context into prompt when possible
         image_analysis_prompt = image_analysis_prompt.replace("{context}", context_text)
+        image_analysis_prompt = apply_custom_extract_prompt(image_analysis_prompt, "image")
 
         # Build messages with image content
         messages = [

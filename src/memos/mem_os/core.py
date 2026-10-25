@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import time
@@ -1038,7 +1039,7 @@ class MOSCore:
             mem_cube_id = accessible_cubes[0].cube_id  # TODO not only first
         else:
             self._validate_cube_access(target_user_id, mem_cube_id)
-        self.mem_cubes[mem_cube_id].text_mem.delete(memory_id)
+        self.mem_cubes[mem_cube_id].text_mem.delete([memory_id])
         logger.info(f"MemCube {mem_cube_id} deleted memory {memory_id}")
 
     def delete_all(self, mem_cube_id: str | None = None, user_id: str | None = None) -> None:
@@ -1048,24 +1049,47 @@ class MOSCore:
         Args:
             mem_cube_id (str): The identifier of the MemCube to delete the memories from.
         """
-        assert mem_cube_id in self.mem_cubes, (
-            f"MemCube with ID {mem_cube_id} does not exist. please regiester"
-        )
         target_user_id = user_id if user_id is not None else self.user_id
-        # Validate user has access to this cube
-        self._validate_cube_access(target_user_id, mem_cube_id)
         if mem_cube_id is None:
-            # Try to find a default cube for the user
+            # Try to find a default cube for the user. Resolve it before any
+            # membership check so the documented default argument actually works.
             accessible_cubes = self.user_manager.get_user_cubes(target_user_id)
             if not accessible_cubes:
                 raise ValueError(
                     f"No accessible cubes found for user '{target_user_id}'. Please register a cube first."
                 )
             mem_cube_id = accessible_cubes[0].cube_id  # TODO not only first
+        # Validate user has access to this cube
+        self._validate_cube_access(target_user_id, mem_cube_id)
+        assert mem_cube_id in self.mem_cubes, (
+            f"MemCube with ID {mem_cube_id} does not exist. please regiester"
+        )
+        # Resolve an explicit tenant before touching a shared graph. If the
+        # user_name is unknown, graph stores fall back to their own config and
+        # an empty config.user_name would clear every tenant.
+        user = self.user_manager.get_user(target_user_id)
+        user_name = getattr(user, "user_name", None) if user is not None else None
+        if not user_name:
+            raise ValueError(
+                f"Cannot resolve user_name for user '{target_user_id}'; refusing to delete all "
+                "memories without an explicit user scope."
+            )
+
+        text_mem = self.mem_cubes[mem_cube_id].text_mem
+        # Shared graph stores scope deletes by user_name; per-cube stores
+        # (naive/general) keep one collection per cube and take no scope.
+        try:
+            supports_user_scope = "user_name" in inspect.signature(text_mem.delete_all).parameters
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Cannot inspect delete_all on {type(text_mem).__name__}; refusing to delete "
+                "memories without a verified user scope."
+            ) from exc
+        if supports_user_scope:
+            text_mem.delete_all(user_name=user_name)
         else:
-            self._validate_cube_access(target_user_id, mem_cube_id)
-        self.mem_cubes[mem_cube_id].text_mem.delete_all()
-        logger.info(f"MemCube {mem_cube_id} deleted all memories")
+            text_mem.delete_all()
+        logger.info(f"MemCube {mem_cube_id} deleted all memories for user '{user_name}'")
 
     def dump(
         self, dump_dir: str, user_id: str | None = None, mem_cube_id: str | None = None

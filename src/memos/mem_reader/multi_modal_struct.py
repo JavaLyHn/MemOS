@@ -9,11 +9,14 @@ from typing import TYPE_CHECKING, Any
 from memos import log
 from memos.configs.mem_reader import MultiModalStructMemReaderConfig
 from memos.context.context import ContextThreadPoolExecutor
+from memos.llms.thinking import disable_thinking
+from memos.mem_reader.custom_extract import apply_custom_extract_prompt
 from memos.mem_reader.read_multi_modal import MultiModalParser, detect_lang
 from memos.mem_reader.read_multi_modal.base import _derive_key
 from memos.mem_reader.read_pref_memory.process_preference_memory import process_preference_fine
 from memos.mem_reader.read_skill_memory.process_skill_memory import process_skill_memory_fine
 from memos.mem_reader.simple_struct import PROMPT_DICT, SimpleStructMemReader
+from memos.mem_reader.temporal import append_temporal_section, temporal_fields
 from memos.mem_reader.utils import parse_json_result
 from memos.memories.textual.item import TextualMemoryItem, TreeNodeTextualMemoryMetadata
 from memos.plugins.hook_defs import H
@@ -76,6 +79,8 @@ class MultiModalStructMemReader(SimpleStructMemReader):
             if config.document_parser_llm is not None
             else None
         )
+        disable_thinking(self.image_parser_llm)
+        disable_thinking(self.document_parser_llm)
         # Initialize MultiModalParser for routing to different parsers
         # Pass dedicated image/document LLMs to their corresponding parsers
         self.multi_modal_parser = MultiModalParser(
@@ -495,6 +500,13 @@ class MultiModalStructMemReader(SimpleStructMemReader):
         if self.config.remove_prompt_example and examples:
             prompt = prompt.replace(examples, "")
 
+        if prompt_type == "doc":
+            prompt = apply_custom_extract_prompt(prompt, "document", fallback_key="detail_factual")
+        else:
+            if prompt_type == "chat":
+                prompt = append_temporal_section(prompt)
+            prompt = apply_custom_extract_prompt(prompt, "detail_factual")
+
         # 提示词里含完整对话原文。原来整条打出来，占当日日志字节的 8%。留长度与 hash
         # 足够定位"这条请求喂了什么"，正文不再落盘。
         logger.info(
@@ -687,6 +699,7 @@ class MultiModalStructMemReader(SimpleStructMemReader):
                             sources=sources,  # Preserve sources from fast item
                             background=resp.get("summary", ""),
                             **extra_kwargs,
+                            **(temporal_fields(m) if prompt_type == "chat" else {}),
                         )
                         if (
                             getattr(self, "memory_version_switch", "off") != "on"
@@ -718,6 +731,7 @@ class MultiModalStructMemReader(SimpleStructMemReader):
                         sources=sources,  # Preserve sources from fast item
                         background=resp.get("summary", ""),
                         **extra_kwargs,
+                        **(temporal_fields(resp) if prompt_type == "chat" else {}),
                     )
                     if (
                         getattr(self, "memory_version_switch", "off") != "on"
@@ -848,6 +862,7 @@ class MultiModalStructMemReader(SimpleStructMemReader):
             lang = detect_lang(mem_str)
             template = TOOL_TRAJECTORY_PROMPT_ZH if lang == "zh" else TOOL_TRAJECTORY_PROMPT_EN
             prompt = template.replace("{messages}", mem_str)
+            prompt = apply_custom_extract_prompt(prompt, "tool_memory")
             # Use general_llm for tool trajectory (not fine-tuned for this task)
             rsp = self.general_llm.generate([{"role": "user", "content": prompt}])
             rsp = rsp.replace("```json", "").replace("```", "")
@@ -965,8 +980,11 @@ class MultiModalStructMemReader(SimpleStructMemReader):
             fast_memory_items = self._concat_multi_modal_memories(all_memory_items)
             ts_parse.set(window_count=len(fast_memory_items))
 
+        # System messages never reach the fast layer, so no later stage sees their tool schemas.
+        schema_items = self._tool_schema_items(scene_data_info, info, **kwargs)
+
         if mode == "fast":
-            return fast_memory_items
+            return fast_memory_items + schema_items
 
         # Stage: llm_extract — fine mode 4-way parallel LLM + per-source serial
         is_upload_skill = kwargs.pop("is_upload_skill", False)
@@ -1051,7 +1069,35 @@ class MultiModalStructMemReader(SimpleStructMemReader):
 
             ts_llm.set(fine_memory_count=len(fine_memory_items), per_source_ms=ts_ps.duration_ms)
 
-        return fine_memory_items
+        return fine_memory_items + schema_items
+
+    def _tool_schema_items(
+        self, scene_data_info: MessagesType, info: dict[str, Any], **kwargs
+    ) -> list[TextualMemoryItem]:
+        if not isinstance(scene_data_info, list):
+            return []
+        user_name = kwargs.get("user_name")
+
+        def stored(ids: list[str]) -> set[str]:
+            nodes = self.graph_db.get_nodes(ids, user_name=user_name) if self.graph_db else []
+            return {
+                n["id"] for n in nodes if (n.get("metadata") or {}).get("status") == "activated"
+            }
+
+        def known_ids(ids: list[str]) -> set[str]:
+            try:
+                return stored(ids)
+            except Exception as e:  # noqa: BLE001 - a failed lookup only costs a re-embed
+                logger.warning(f"[MultiModalStruct] tool schema lookup failed: {e}")
+                return set()
+
+        try:
+            return self.multi_modal_parser.system_parser.tool_schema_items(
+                scene_data_info, info, existing_ids=known_ids, **kwargs
+            )
+        except Exception as e:  # noqa: BLE001 - schemas are an extra, never fail the add
+            logger.warning(f"[MultiModalStruct] tool schema extraction failed: {e}")
+            return []
 
     @timed
     def _process_transfer_multi_modal_data(
@@ -1063,6 +1109,8 @@ class MultiModalStructMemReader(SimpleStructMemReader):
         Each source is processed independently by its corresponding parser,
         which knows how to rebuild the original message and parse it in fine mode.
         """
+        # Tool schemas are written complete by the fast path; there is nothing left to extract.
+        raw_nodes = [n for n in raw_nodes if n.metadata.memory_type != "ToolSchemaMemory"]
         if not raw_nodes:
             logger.warning("[MultiModalStruct] No raw nodes found.")
             return []

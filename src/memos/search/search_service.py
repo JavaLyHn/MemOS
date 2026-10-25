@@ -93,6 +93,8 @@ def search_text_memories(
         skill_mem_top_k=search_req.skill_mem_top_k,
         include_preference_memory=search_req.include_preference,
         pref_mem_top_k=search_req.pref_top_k,
+        include_dream_memory=search_req.include_dream_memory,
+        dream_mem_top_k=search_req.dream_mem_top_k,
         dedup=search_req.dedup,
         rerank=search_req.rerank,
         include_embedding=include_embedding,

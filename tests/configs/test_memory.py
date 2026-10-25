@@ -167,7 +167,7 @@ def test_textual_memory_config():
             "embedder",
         ],
         required_fields=[],
-        optional_fields=["cube_id", "memory_filename"],
+        optional_fields=["cube_id", "memory_filename", "hybrid_search"],
     )
 
     check_config_instantiation_valid(
@@ -190,6 +190,10 @@ def test_textual_memory_config():
                 "config": {
                     "model_name_or_path": "test-embedder",
                 },
+            },
+            "hybrid_search": {
+                "enabled": True,
+                "candidate_top_k": 20,
             },
         },
     )

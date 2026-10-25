@@ -51,6 +51,7 @@ def build_graph_db_config(user_id: str = "default") -> dict[str, Any]:
         "neo4j": APIConfig.get_neo4j_config(user_id=user_id),
         "polardb": APIConfig.get_polardb_config(user_id=user_id),
         "postgres": APIConfig.get_postgres_config(user_id=user_id),
+        "hugegraph": APIConfig.get_hugegraph_config(user_id=user_id),
     }
 
     # Support both GRAPH_DB_BACKEND and legacy NEO4J_BACKEND env vars
@@ -87,12 +88,7 @@ def build_llm_config() -> dict[str, Any]:
     Returns:
         Validated LLM configuration dictionary
     """
-    return LLMConfigFactory.model_validate(
-        {
-            "backend": "openai",
-            "config": APIConfig.get_openai_config(),
-        }
-    )
+    return LLMConfigFactory.model_validate(APIConfig.get_scheduler_llm_config())
 
 
 def build_feedback_llm_config() -> dict[str, Any]:
@@ -231,7 +227,7 @@ def _init_chat_llms(chat_llm_configs: list[dict]) -> dict[str, Any]:
                 if client.models.list().data
                 else client.models.list().models
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - keep scheduler init alive on any listing failure
             logger.error(f"Error listing models: {e}")
             models = []
         return models
@@ -257,8 +253,8 @@ def init_components() -> dict[str, Any]:
             logger.error(
                 "Failed to initialize Redis client. Check REDIS_HOST etc. in environment variables."
             )
-    except Exception as e:
-        logger.error(f"Failed to initialize Redis client: {e}", exc_info=True)
+    except Exception:  # keep scheduler init alive on any redis failure
+        logger.exception("Failed to initialize Redis client")
         redis_client = None  # Ensure redis_client exists even on failure
 
     # Get default cube configuration

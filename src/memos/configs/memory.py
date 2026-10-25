@@ -9,6 +9,7 @@ from memos.configs.internet_retriever import InternetRetrieverConfigFactory
 from memos.configs.llm import LLMConfigFactory
 from memos.configs.mem_reader import MemReaderConfigFactory
 from memos.configs.reranker import RerankerConfigFactory
+from memos.configs.search import HybridSearchConfig
 from memos.configs.vec_db import VectorDBConfigFactory
 from memos.exceptions import ConfigurationError
 from memos.memories.textual.prefer_text_memory.config import (
@@ -137,6 +138,13 @@ class GeneralTextMemoryConfig(BaseTextMemoryConfig):
         ...,
         default_factory=EmbedderConfigFactory,
         description="Embedder configuration for the memory embedding",
+    )
+    hybrid_search: HybridSearchConfig | None = Field(
+        None,
+        description=(
+            "Optional BM25 + vector hybrid retrieval. Leave unset (default) to keep "
+            "the original vector-only search behaviour."
+        ),
     )
 
 

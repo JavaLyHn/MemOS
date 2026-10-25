@@ -1,5 +1,6 @@
 import logging
 
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
@@ -33,7 +34,8 @@ class APIExceptionHandler:
             content={
                 "code": 422,
                 "message": f"Parameter validation error on {method} {path}: {'; '.join(readable_errors)}",
-                "detail": errors,
+                # A validator's ValueError rides in ctx.error as an exception object.
+                "detail": jsonable_encoder(errors, custom_encoder={Exception: str}),
                 "data": None,
             },
         )

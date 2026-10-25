@@ -119,6 +119,7 @@ def summarize_add_request(request: Any) -> dict[str, Any]:
         "chat_history_count": len(getattr(request, "chat_history", None) or []),
         "memory_content_chars": len(memory_content),
         "custom_tag_count": len(getattr(request, "custom_tags", None) or []),
+        "custom_extract_keys": sorted(getattr(request, "custom_extract_prompt", None) or []),
         "has_doc_path": bool(getattr(request, "doc_path", None)),
         "is_feedback": getattr(request, "is_feedback", None),
     }

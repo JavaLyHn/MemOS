@@ -14,6 +14,7 @@ from memos.configs.reranker import RerankerConfigFactory
 from memos.context.context import ContextThreadPoolExecutor
 from memos.dependency import require_python_package
 from memos.embedders.factory import EmbedderFactory, OllamaEmbedder
+from memos.exceptions import MemoryDeleteError
 from memos.graph_dbs.factory import GraphStoreFactory
 from memos.llms.factory import AzureLLM, LLMFactory, OllamaLLM, OpenAILLM
 from memos.log import get_logger
@@ -175,6 +176,8 @@ class TreeTextMemory(BaseTextMemory):
         skill_mem_top_k: int = 3,
         include_preference_memory: bool = False,
         pref_mem_top_k: int = 6,
+        include_dream_memory: bool = False,
+        dream_mem_top_k: int = 1,
         dedup: str | None = None,
         include_embedding: bool | None = None,
         **kwargs,
@@ -230,6 +233,8 @@ class TreeTextMemory(BaseTextMemory):
             skill_mem_top_k=skill_mem_top_k,
             include_preference_memory=include_preference_memory,
             pref_mem_top_k=pref_mem_top_k,
+            include_dream_memory=include_dream_memory,
+            dream_mem_top_k=dream_mem_top_k,
             dedup=dedup,
             **kwargs,
         )
@@ -274,7 +279,7 @@ class TreeTextMemory(BaseTextMemory):
 
             # Step 2: Get top-1 similar node
             similar_nodes = self.graph_store.search_by_embedding(
-                query_embedding, top_k=top_k, user_name=user_name
+                query_embedding, top_k=top_k, status=center_status, user_name=user_name
             )
 
         elif search_type == "fulltext":
@@ -299,6 +304,7 @@ class TreeTextMemory(BaseTextMemory):
             similar_nodes = self.graph_store.search_by_fulltext(
                 query_words=queries,
                 top_k=top_k,
+                status=center_status,
                 user_name=user_name,
             )
 
@@ -388,8 +394,13 @@ class TreeTextMemory(BaseTextMemory):
         page_size: int | None = None,
         filter: dict | None = None,
         memory_type: list[str] | None = None,
+        status: list[str] | None = None,
     ) -> dict:
         """Get all memories.
+
+        ``status`` limits the nodes to those states; unset keeps the store's default (everything
+        but deleted).
+
         Returns:
             list[TextualMemoryItem]: List of all memories.
         """
@@ -400,25 +411,48 @@ class TreeTextMemory(BaseTextMemory):
             page_size=page_size,
             filter=filter,
             memory_type=memory_type,
+            **({"status": status} if status else {}),
         )
         return graph_output
 
     def delete(self, memory_ids: list[str], user_name: str | None = None) -> None:
-        """Hard delete: permanently remove nodes and their edges from the graph."""
+        """Hard delete: permanently remove nodes and their edges from the graph.
+
+        Every id is attempted; if any node could not be deleted the failure is
+        raised after the loop so callers do not treat a partial delete as success.
+        """
         if not memory_ids:
             return
+        failures: dict[str, Exception] = {}
         for mid in memory_ids:
             try:
                 self.graph_store.delete_node(mid, user_name=user_name)
             except Exception as e:
-                logger.warning(f"TreeTextMemory.delete_hard: failed to delete {mid}: {e}")
+                logger.error(f"TreeTextMemory.delete_hard: failed to delete {mid}: {e}")
+                failures[mid] = e
+        if failures:
+            raise MemoryDeleteError(
+                f"Failed to delete {len(failures)} of {len(memory_ids)} memories: "
+                f"{sorted(failures)}"
+            ) from next(iter(failures.values()))
 
-    def delete_by_memory_ids(self, memory_ids: list[str]) -> None:
-        """Delete memories by memory_ids."""
+    def delete_by_memory_ids(
+        self, memory_ids: list[str], writable_cube_ids: list[str] | None = None
+    ) -> None:
+        """Delete memories by memory_ids, scoped to the writable cubes when given.
+
+        共享图库下 `memory_ids` 必须带租户作用域,否则只靠 id 就能删到其它
+        租户的节点。失败必须向上抛,调用方不能把“没删掉”当成功。
+        """
+        if not memory_ids:
+            return
         try:
-            self.graph_store.delete_node_by_prams(memory_ids=memory_ids)
+            self.graph_store.delete_node_by_prams(
+                memory_ids=memory_ids, writable_cube_ids=writable_cube_ids
+            )
         except Exception as e:
             logger.error(f"An error occurred while deleting memories by memory_ids: {e}")
+            raise
 
     def delete_all(self, user_name: str | None = None) -> None:
         """Delete all memories and their relationships from the graph store."""
@@ -650,4 +684,3 @@ class TreeTextMemory(BaseTextMemory):
             # Wait for all tasks to complete and raise any exceptions
             for future in futures:
                 future.result()
-        return

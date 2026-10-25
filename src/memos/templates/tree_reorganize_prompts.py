@@ -156,16 +156,21 @@ If you find NO useful higher-level concept, reply exactly: "None".
 
 
 MEMORY_RELATION_DETECTOR_PROMPT = """You are a memory relationship analyzer.
-You are given two plaintext statements. Determine the relationship between them. Classify the relationship into one of the following categories:
+You are given two statements about the same user. Statement A was recorded earlier than Statement B (the recording times are shown when known). Decide how B relates to A and answer with exactly one label:
 
-contradictory: The two statements describe the same event or related aspects of it but contain factually conflicting details.
-redundant: The two statements describe essentially the same event or information with significant overlap in content and details, conveying the same core information (even if worded differently).
-independent: The two statements are either about different events/topics (unrelated) OR describe different, non-overlapping aspects or perspectives of the same event without conflict (complementary). In both sub-cases, they provide distinct information without contradiction.
-Respond only with one of the three labels: contradictory, redundant, or independent.
+supersedes: A and B describe the same changeable fact (where the user lives, works or studies; a plan, a status, a setting, an ownership) and B gives a new value that replaces A. Once B is true, A is no longer true.
+redundant: A and B convey essentially the same information, even if worded differently. B adds nothing that changes the fact.
+both_valid: A and B look similar or seem to disagree, but both can be true at the same time (different people, places, occasions or time points, or one is a past occasion rather than a current state).
+independent: A and B are about different topics, or about complementary aspects, with no conflict.
+
+Rules:
+- A one-off event that happened at a specific time (a trip, a meeting, a purchase) never supersedes another event. Two such events are both_valid or independent.
+- When unsure between supersedes and both_valid, answer both_valid.
+Respond only with one of the four labels: supersedes, redundant, both_valid, independent.
 Do not provide any explanation or additional text.
 
-Statement 1: {statement_1}
-Statement 2: {statement_2}
+Statement A (recorded {time_1}): {statement_1}
+Statement B (recorded {time_2}): {statement_2}
 """
 
 

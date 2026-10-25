@@ -6,7 +6,6 @@ import threading
 import time
 
 from contextlib import contextmanager
-from datetime import datetime
 from typing import Any, Literal
 
 import numpy as np
@@ -15,7 +14,8 @@ from memos.configs.graph_db import PolarDBGraphDBConfig
 from memos.dependency import require_python_package
 from memos.graph_dbs.base import BaseGraphDB
 from memos.log import get_logger
-from memos.utils import timed
+from memos.time_basis import TIME_BASIS_UTC, convert_legacy_node, stamp_utc_basis
+from memos.utils import timed, utc_now_iso
 
 
 logger = get_logger(__name__)
@@ -51,18 +51,22 @@ def _compose_node(item: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     return node_id, memory, metadata
 
 
-def _prepare_node_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+def _prepare_node_metadata(metadata: dict[str, Any], *, stamp_basis: bool = True) -> dict[str, Any]:
     """
     Ensure metadata has proper datetime fields and normalized types.
 
     - Fill `created_at` and `updated_at` if missing (in ISO 8601 format).
     - Convert embedding to list of float if present.
+    - Stamp ``time_basis="utc"`` (see ``memos.time_basis``); pass
+      ``stamp_basis=False`` when re-importing a foreign export.
     """
-    now = datetime.utcnow().isoformat()
+    now = utc_now_iso()
 
     # Fill timestamps if missing
     metadata.setdefault("created_at", now)
     metadata.setdefault("updated_at", now)
+    if stamp_basis:
+        stamp_utc_basis(metadata)
 
     # Normalize embedding type
     embedding = metadata.get("embedding")
@@ -222,7 +226,6 @@ class PolarDBGraphDB(BaseGraphDB):
                 break
         logger.info(f"[warm_up] Pre-warmed {warm_count} connections for search_by_fulltext")
 
-
     def _warm_up_connections_by_all(self):
         logger.info("--_warm_up_connections_by_all--start-up")
         warm_count = self.connection_pool.minconn
@@ -293,7 +296,6 @@ class PolarDBGraphDB(BaseGraphDB):
         except Exception as e:
             logger.error(f"Failed to access database '{self.db_name}': {e}")
             raise
-
 
     def create_index(
         self,
@@ -449,6 +451,10 @@ class PolarDBGraphDB(BaseGraphDB):
 
         # Update properties but keep original id and memory fields
         properties = current_node["metadata"].copy()
+        # One node must not end up with two time bases: convert whatever the
+        # caller is not overwriting, then mark the whole node as real UTC.
+        convert_legacy_node(properties, skip=set(fields))
+        properties["time_basis"] = TIME_BASIS_UTC
         original_id = properties.get("id", id)  # Preserve original ID
         original_memory = current_node.get("memory", "")  # Preserve original memory
 
@@ -525,7 +531,6 @@ class PolarDBGraphDB(BaseGraphDB):
             logger.error(f"[delete_node] Failed to delete node '{id}': {e}", exc_info=True)
             raise
 
-
     @timed
     def add_edge(
         self, source_id: str, target_id: str, type: str, user_name: str | None = None
@@ -592,7 +597,6 @@ class PolarDBGraphDB(BaseGraphDB):
         with self._get_connection() as conn, conn.cursor() as cursor:
             cursor.execute(query, (source_id, target_id, type))
             logger.info(f"Edge deleted: {source_id} -[{type}]-> {target_id}")
-
 
     @timed
     def edge_exists(
@@ -791,13 +795,11 @@ class PolarDBGraphDB(BaseGraphDB):
                 nodes.append(self._parse_node(properties))
             return nodes
 
-
     def get_neighbors(
         self, id: str, type: str, direction: Literal["in", "out", "both"] = "out"
     ) -> list[str]:
         """Get connected node IDs in a specific direction and relationship type."""
         raise NotImplementedError
-
 
     @timed
     def get_children_with_embeddings(
@@ -1715,7 +1717,6 @@ class PolarDBGraphDB(BaseGraphDB):
         logger.info("get_by_metadata internal took %.1f ms", elapsed)
         return ids
 
-
     @timed
     def get_grouped_counts(
         self,
@@ -1845,7 +1846,8 @@ class PolarDBGraphDB(BaseGraphDB):
                 logger.info("Cleared all nodes from database.")
 
         except Exception as e:
-            logger.error(f"[ERROR] Failed to clear database: {e}")
+            logger.error(f"[ERROR] Failed to clear database: {e}", exc_info=True)
+            raise
 
     @timed
     def export_graph(
@@ -2062,7 +2064,6 @@ class PolarDBGraphDB(BaseGraphDB):
             "total_edges": total_edges,
         }
 
-
     @timed
     def get_all_memory_items(
         self,
@@ -2219,7 +2220,6 @@ class PolarDBGraphDB(BaseGraphDB):
                 logger.error(f"Failed to get memories: {e}", exc_info=True)
 
             return nodes
-
 
     @timed
     def get_structure_optimization_candidates(
@@ -2516,8 +2516,8 @@ class PolarDBGraphDB(BaseGraphDB):
         metadata = _prepare_node_metadata(metadata)
 
         # Merge node and set metadata
-        created_at = metadata.pop("created_at", datetime.utcnow().isoformat())
-        updated_at = metadata.pop("updated_at", datetime.utcnow().isoformat())
+        created_at = metadata.pop("created_at", utc_now_iso())
+        updated_at = metadata.pop("updated_at", utc_now_iso())
 
         # Prepare properties
         properties = {
@@ -2621,13 +2621,13 @@ class PolarDBGraphDB(BaseGraphDB):
         self,
         nodes: list[dict[str, Any]],
         user_name: str | None = None,
-    ) -> None:
+    ) -> list[str]:
         logger.info(f" add_nodes_batch Processing only first node (total nodes: {len(nodes)})")
 
         batch_start_time = time.perf_counter()
         if not nodes:
             logger.warning("[add_nodes_batch] Empty nodes list, skipping")
-            return
+            return []
 
         effective_user_name = user_name if user_name else self.config.user_name
 
@@ -2644,8 +2644,8 @@ class PolarDBGraphDB(BaseGraphDB):
 
                 metadata = _prepare_node_metadata(metadata)
 
-                created_at = metadata.pop("created_at", datetime.utcnow().isoformat())
-                updated_at = metadata.pop("updated_at", datetime.utcnow().isoformat())
+                created_at = metadata.pop("created_at", utc_now_iso())
+                updated_at = metadata.pop("updated_at", utc_now_iso())
 
                 properties = {
                     "id": id,
@@ -2703,7 +2703,7 @@ class PolarDBGraphDB(BaseGraphDB):
 
         if not prepared_nodes:
             logger.warning("[add_nodes_batch] No valid nodes to insert after preparation")
-            return
+            return []
 
         nodes_by_embedding_column = {}
         for node in prepared_nodes:
@@ -2801,6 +2801,8 @@ class PolarDBGraphDB(BaseGraphDB):
         except Exception as e:
             logger.error(f"[add_nodes_batch] Failed to add nodes: {e}", exc_info=True)
             raise
+
+        return [node["id"] for node in prepared_nodes]
 
     def _build_node_from_agtype(self, node_agtype, embedding=None):
         """
@@ -2963,7 +2965,6 @@ class PolarDBGraphDB(BaseGraphDB):
             logger.error(f"Failed to get neighbors by tag: {e}", exc_info=True)
             return []
 
-
     @timed
     def import_graph(self, data: dict[str, Any], user_name: str | None = None) -> None:
         """
@@ -2980,7 +2981,7 @@ class PolarDBGraphDB(BaseGraphDB):
             try:
                 id, memory, metadata = _compose_node(node)
                 metadata["user_name"] = user_name
-                metadata = _prepare_node_metadata(metadata)
+                metadata = _prepare_node_metadata(metadata, stamp_basis=False)
                 metadata.update({"id": id, "memory": memory})
 
                 # Use add_node to insert node
@@ -4419,7 +4420,7 @@ class PolarDBGraphDB(BaseGraphDB):
                     )
                     where_clause = f"{user_name_condition} AND {delete_time_empty_condition} AND {delete_record_id_empty_condition}"
 
-                    current_time = datetime.utcnow().isoformat()
+                    current_time = utc_now_iso()
                     update_query = f"""
                         UPDATE "{self.db_name}_graph"."Memory"
                         SET properties = (

@@ -38,6 +38,17 @@ class BaseVectorIndex(ABC):
     ) -> list[VecDBItem]:
         """Search vectors and return backend-neutral items."""
 
+    @property
+    def vec_db(self) -> BaseVecDB | None:
+        """The wrapped vector database, when this adapter has one.
+
+        The Neo4j graph backends expose their raw VecDB as ``vec_db``, and
+        ``tree_text_memory/organize/handler.py`` reaches for that name to sync a
+        merged loser's payload status. Graph providers built on this adapter
+        expose the same attribute so that sync is not a silent no-op.
+        """
+        return None
+
 
 class _ConfiguredVectorIndex(BaseVectorIndex):
     """Common collection health handling for configured vector backends."""
@@ -45,6 +56,10 @@ class _ConfiguredVectorIndex(BaseVectorIndex):
     def __init__(self, vector_db: BaseVecDB, collection_name: str):
         self._vector_db = vector_db
         self._collection_name = collection_name
+
+    @property
+    def vec_db(self) -> BaseVecDB:
+        return self._vector_db
 
     def check_health(self) -> None:
         if not self._vector_db.collection_exists(self._collection_name):

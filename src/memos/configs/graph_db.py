@@ -245,8 +245,11 @@ class HugeGraphDBConfig(BaseConfig):
     """
     Configuration for Apache HugeGraph backend using hugegraph-python (pyhugegraph).
 
-    Schema must be created manually before use.
-    Run docker/hugegraph-schema.groovy in Gremlin Console or HugeGraph Studio.
+    The backend bootstraps its property keys, vertex/edge labels and indexes
+    from __init__ (idempotent); docker/hugegraph-schema.groovy remains as the
+    human-readable DDL for Gremlin Console users. graphspace is optional for
+    a single-machine DEFAULT deployment but REQUIRED on HStore, where every
+    graph lives inside a graphspace.
 
     Example:
     ---

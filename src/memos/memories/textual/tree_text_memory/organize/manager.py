@@ -3,18 +3,20 @@ import traceback
 import uuid
 
 from concurrent.futures import as_completed
-from datetime import datetime
 
 from memos.context.context import ContextThreadPoolExecutor
 from memos.embedders.factory import OllamaEmbedder
 from memos.graph_dbs.base import BaseGraphDB
 from memos.llms.factory import AzureLLM, OllamaLLM, OpenAILLM
 from memos.log import get_logger
+from memos.mem_reader.read_skill_memory import skill_store
 from memos.memories.textual.item import TextualMemoryItem
+from memos.memories.textual.tree_text_memory.organize import tool_schema_versions
 from memos.memories.textual.tree_text_memory.organize.reorganizer import (
     GraphStructureReorganizer,
     QueueMessage,
 )
+from memos.utils import utc_now_iso
 
 
 logger = get_logger(__name__)
@@ -107,10 +109,13 @@ class MemoryManager:
             List of added memory IDs.
         """
         added_ids: list[str] = []
+        memories = tool_schema_versions.skip_live_schemas(self.graph_store, memories, user_name)
         if use_batch:
             added_ids = self._add_memories_batch(memories, user_name)
         else:
             added_ids = self._add_memories_parallel(memories, user_name)
+        tool_schema_versions.fold_replaced_schemas(self.graph_store, memories, user_name)
+        skill_store.settle_file_cleanup(self.graph_store, memories, user_name)
 
         if mode == "sync":
             self._cleanup_working_memory(user_name)
@@ -155,7 +160,6 @@ class MemoryManager:
         added_ids: list[str] = []
         working_nodes: list[dict] = []
         graph_nodes: list[dict] = []
-        graph_node_ids: list[str] = []
 
         for memory in memories:
             working_id = memory.id if hasattr(memory, "id") else memory.id or str(uuid.uuid4())
@@ -169,7 +173,7 @@ class MemoryManager:
                 working_metadata = memory.metadata.model_copy(
                     update={"memory_type": "WorkingMemory"}
                 ).model_dump(exclude_none=True)
-                working_metadata["updated_at"] = datetime.now().isoformat()
+                working_metadata["updated_at"] = utc_now_iso()
                 working_nodes.append(
                     {
                         "id": working_id,
@@ -185,12 +189,13 @@ class MemoryManager:
                 "RawFileMemory",
                 "SkillMemory",
                 "PreferenceMemory",
+                "EventMemory",
             ):
                 graph_node_id = (
                     memory.id if hasattr(memory, "id") else memory.id or str(uuid.uuid4())
                 )
                 metadata_dict = memory.metadata.model_dump(exclude_none=True)
-                metadata_dict["updated_at"] = datetime.now().isoformat()
+                metadata_dict["updated_at"] = utc_now_iso()
                 metadata_dict["working_binding"] = working_id
 
                 # Add working_binding for fast mode
@@ -210,39 +215,53 @@ class MemoryManager:
                         "metadata": metadata_dict,
                     }
                 )
-                graph_node_ids.append(graph_node_id)
-                added_ids.append(graph_node_id)
 
-        def _submit_batches(nodes: list[dict], node_kind: str) -> None:
+        def _submit_batches(nodes: list[dict], node_kind: str) -> list[str]:
             if not nodes:
-                return
+                return []
 
+            confirmed_ids: list[str] = []
             max_workers = min(8, max(1, len(nodes) // max(1, batch_size)))
             with ContextThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures: list[tuple[int, int, object]] = []
+                futures: list[tuple[int, list[dict], object]] = []
                 for batch_index, i in enumerate(range(0, len(nodes), batch_size), start=1):
                     batch = nodes[i : i + batch_size]
                     fut = executor.submit(
                         self.graph_store.add_nodes_batch, batch, user_name=user_name
                     )
-                    futures.append((batch_index, len(batch), fut))
+                    futures.append((batch_index, batch, fut))
 
-                for idx, size, fut in futures:
+                for idx, batch, fut in futures:
                     try:
-                        fut.result()
+                        written = fut.result()
                     except Exception as e:
+                        # The whole batch failed; none of its ids may be reported.
                         logger.exception(
-                            f"Batch add {node_kind} nodes error (batch {idx}, size {size}): ",
+                            f"Batch add {node_kind} nodes error (batch {idx}, size {len(batch)}): ",
                             exc_info=e,
                         )
+                        continue
+                    if isinstance(written, list):
+                        # Stores that tolerate per-node preparation errors report
+                        # exactly which ids they wrote.
+                        confirmed_ids.extend(str(node_id) for node_id in written)
+                    else:
+                        # Legacy contract: the store raises on failure, so a
+                        # successful return means the whole batch was written.
+                        confirmed_ids.extend(node["id"] for node in batch)
+            return confirmed_ids
 
         # TODO: working id is same with item.id, need to fix, currently stop adding WorkingMemories here.
         #  here used to be: _submit_batches(working_nodes, "WorkingMemory")
-        _submit_batches(graph_nodes, "graph memory")
+        added_ids.extend(_submit_batches(graph_nodes, "graph memory"))
 
-        if graph_node_ids and self.is_reorganize:
+        if added_ids and self.is_reorganize:
+            # ``after_node`` 必须是副本：队列消费者（``_convert_id_to_node``）会把里面的
+            # id 就地换成 GraphDBNode，而 ``added_ids`` 同时是本函数的返回值。传引用
+            # 等于把调用方手里的列表交给另一个线程改 —— 调用方随后 ``json.dumps``
+            # 就会撞上 "Object of type GraphDBNode is not JSON serializable"。
             self.reorganizer.add_message(
-                QueueMessage(op="add", after_node=graph_node_ids, user_name=user_name)
+                QueueMessage(op="add", after_node=list(added_ids), user_name=user_name)
             )
 
         return added_ids
@@ -346,6 +365,7 @@ class MemoryManager:
                 "RawFileMemory",
                 "SkillMemory",
                 "PreferenceMemory",
+                "EventMemory",
             ):
                 f_graph = ex.submit(
                     self._add_to_graph_memory,
@@ -380,7 +400,7 @@ class MemoryManager:
         metadata = memory.metadata.model_copy(update={"memory_type": memory_type}).model_dump(
             exclude_none=True
         )
-        metadata["updated_at"] = datetime.now().isoformat()
+        metadata["updated_at"] = utc_now_iso()
         node_id = forced_id or str(uuid.uuid4())
         working_memory = TextualMemoryItem(id=node_id, memory=memory.memory, metadata=metadata)
         # Insert node into graph

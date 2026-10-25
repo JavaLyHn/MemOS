@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING
 
 from memos.context.context import ContextThreadPoolExecutor
 from memos.log import get_logger
+from memos.mem_reader.custom_extract import use_custom_extract_prompt
+from memos.mem_reader.prompt_config import use_project_extract_prompt
+from memos.mem_reader.tag_matcher import apply_semantic_custom_tags
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
 from memos.mem_scheduler.schemas.task_schemas import (
     LONG_TERM_MEMORY_TYPE,
@@ -24,6 +27,51 @@ from memos.memories.textual.tree import TreeTextMemory
 
 
 logger = get_logger(__name__)
+
+
+def _propagate_owner_fields(source_items: list, refined_items: list) -> None:
+    """Carry the owner fields of the fast input onto refined memories.
+
+    The refinement pipeline re-extracts memories and does not necessarily keep
+    custom metadata, so owner scope would otherwise be lost for async adds.
+    Only propagated when all source items share one owner (the common case:
+    one extraction view per task).
+    """
+    owners = {
+        (getattr(item.metadata, "owner_type", None), getattr(item.metadata, "owner_id", None))
+        for item in source_items
+        if getattr(item.metadata, "owner_type", None)
+    }
+    if len(owners) != 1:
+        return
+    owner_type, owner_id = next(iter(owners))
+    source = source_items[0].metadata
+    for item in refined_items:
+        item.metadata.owner_type = owner_type
+        item.metadata.owner_id = owner_id
+        for field in ("user_id", "agent_id", "group_id", "task_id", "expires_at"):
+            value = getattr(source, field, None)
+            if value and not getattr(item.metadata, field, None):
+                setattr(item.metadata, field, value)
+
+
+def _archive_two_stage_coarse_nodes(
+    *, text_mem, user_name: str, task_id: str | None, fine_memories: list
+) -> None:
+    from memos.memories.textual.two_stage import archive_coarse_nodes, two_stage_enabled
+
+    if not two_stage_enabled() or not task_id:
+        return
+    try:
+        archive_coarse_nodes(
+            getattr(text_mem, "graph_store", None),
+            user_name=user_name,
+            task_id=task_id,
+            fine_memories=fine_memories,
+        )
+    except Exception:
+        logger.warning("Failed to archive two-stage coarse nodes", exc_info=True)
+
 
 if TYPE_CHECKING:
     from memos.types.general_types import UserContext
@@ -167,19 +215,34 @@ class MemReadMessageHandler(BaseSchedulerHandler):
 
             info = dict(info or {})
             is_upload_skill = info.pop("is_upload_skill", False)
+            custom_extract_prompt = info.pop("custom_extract_prompt", None)
+            custom_tags_match = info.pop("custom_tags_match", None)
 
+            transfer_failed = False
             try:
-                processed_memories = mem_reader.fine_transfer_simple_mem(
-                    memory_items,
-                    type="chat",
-                    custom_tags=custom_tags,
-                    user_name=user_name,
-                    chat_history=chat_history,
-                    user_context=user_context,
-                    is_upload_skill=is_upload_skill,
-                )
+                with (
+                    use_project_extract_prompt(user_name),
+                    use_custom_extract_prompt(custom_extract_prompt),
+                ):
+                    processed_memories = mem_reader.fine_transfer_simple_mem(
+                        memory_items,
+                        type="chat",
+                        custom_tags=custom_tags,
+                        user_name=user_name,
+                        chat_history=chat_history,
+                        user_context=user_context,
+                        is_upload_skill=is_upload_skill,
+                    )
             except Exception as e:
-                logger.warning("%s: Fail to transfer mem: %s", e, memory_items)
+                # 抽取失败(LLM/embedder 超时、限流、解析失败)时不能继续走删除:
+                # 下面的清理会把唯一一份原始 fast memory 删掉,且没有可回滚的副本。
+                transfer_failed = True
+                logger.error(
+                    "%s: Fail to transfer mem, keeping raw memories %s: %s",
+                    e,
+                    mem_ids,
+                    memory_items,
+                )
                 processed_memories = []
 
             if processed_memories and len(processed_memories) > 0:
@@ -190,6 +253,13 @@ class MemReadMessageHandler(BaseSchedulerHandler):
                 logger.info("mem_reader processed %s enhanced memories", len(flattened_memories))
 
                 if flattened_memories:
+                    apply_semantic_custom_tags(
+                        flattened_memories,
+                        custom_tags,
+                        getattr(mem_reader, "embedder", None),
+                        enabled=custom_tags_match,
+                    )
+                    _propagate_owner_fields(memory_items, flattened_memories)
                     mem_group = [
                         memory
                         for memory in flattened_memories
@@ -200,6 +270,13 @@ class MemReadMessageHandler(BaseSchedulerHandler):
                         "Added %s enhanced memories: %s",
                         len(enhanced_mem_ids),
                         enhanced_mem_ids,
+                    )
+
+                    _archive_two_stage_coarse_nodes(
+                        text_mem=text_mem,
+                        user_name=user_name,
+                        task_id=task_id,
+                        fine_memories=mem_group,
                     )
 
                     # add raw file nodes and edges
@@ -397,6 +474,14 @@ class MemReadMessageHandler(BaseSchedulerHandler):
                     logger.info("No enhanced memories generated by mem_reader")
             else:
                 logger.info("mem_reader returned no processed memories")
+
+            if transfer_failed:
+                logger.error(
+                    "Fine extraction failed for mem_ids=%s; skip raw/working cleanup to "
+                    "avoid deleting the only copy",
+                    mem_ids,
+                )
+                return
 
             delete_ids = list(mem_ids)
             if bindings_to_delete:

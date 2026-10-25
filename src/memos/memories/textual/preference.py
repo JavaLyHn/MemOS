@@ -1,7 +1,6 @@
 import json
 import os
 
-from datetime import datetime
 from typing import Any
 
 from memos.configs.memory import PreferenceTextMemoryConfig
@@ -23,6 +22,7 @@ from memos.memories.textual.prefer_text_memory.factory import (
 )
 from memos.reranker.factory import RerankerFactory
 from memos.types import MessageList
+from memos.utils import normalize_to_utc_iso
 from memos.vec_dbs.factory import MilvusVecDB, QdrantVecDB, VecDBFactory
 from memos.vec_dbs.item import VecDBItem
 
@@ -289,10 +289,10 @@ class PreferenceTextMemory(BaseTextMemory):
             ]
             memories.extend(db_items_memory)
 
-        # sort
+        # sort (ISO-8601 UTC so naive legacy rows and aware rows compare safely)
         sorted_memories = sorted(
             memories,
-            key=lambda item: datetime.fromisoformat(item.metadata.created_at),
+            key=lambda item: normalize_to_utc_iso(item.metadata.created_at) or "",
             reverse=True,
         )
         if page and page_size:

@@ -1,14 +1,105 @@
 import functools
+import json
 import time
 import traceback
 
 from contextlib import ContextDecorator
+from datetime import datetime, timezone
 from typing import Any
 
 from memos.log import get_logger
 
 
 logger = get_logger(__name__)
+
+# Naive timestamps in this code base are UTC by definition. Earlier images used
+# to write Beijing wall-clock values with a "+00:00" suffix; all new writes go
+# through these helpers so that the offset in the string is always the truth.
+_NAIVE_DATETIME_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+)
+_CHAT_TIME_FORMATS = (
+    "%I:%M %p on %d %B, %Y",
+    "%I:%M%p on %d %B, %Y",
+)
+
+
+def utc_now() -> datetime:
+    """Timezone-aware current UTC time."""
+    return datetime.now(timezone.utc)
+
+
+def utc_now_iso() -> str:
+    """Current UTC time in ISO 8601 with an explicit ``+00:00`` offset."""
+    return utc_now().isoformat()
+
+
+def parse_datetime(value: Any) -> datetime | None:
+    """Best-effort parse of an ISO-8601 / common timestamp into a datetime.
+
+    Accepts ``str``, ``int``/``float`` epoch values (seconds or milliseconds),
+    and ``datetime`` instances. Naive values are interpreted as UTC, matching
+    the code base's baseline. Returns ``None`` when the value cannot be
+    parsed; callers that must keep free-form text should fall back to the raw
+    value instead of raising.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        seconds = float(value)
+        if abs(seconds) >= 1e11:  # milliseconds
+            seconds /= 1000.0
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+    parsed: datetime | None = None
+    try:
+        parsed = datetime.fromisoformat(iso_text)
+    except ValueError:
+        for fmt in (*_NAIVE_DATETIME_FORMATS, *_CHAT_TIME_FORMATS):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    # Naive timestamps in this code base are UTC by definition. Returning an
+    # aware value keeps sorting/comparison safe when old rows (naive) and new
+    # rows (aware, see T1.3) coexist.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def normalize_to_utc_iso(value: Any) -> str | None:
+    """Normalize a timestamp to ISO 8601 UTC (``+00:00``), or ``None``.
+
+    Naive datetimes are treated as UTC, which is the code base's baseline.
+    """
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
 
 
 class timed_stage(ContextDecorator):  # noqa: N801
@@ -252,3 +343,87 @@ def timed(func=None, *, log=True, log_prefix=""):
     if func is None:
         return decorator
     return decorator(func)
+
+
+# --- JSON 字符串字段归一化 -------------------------------------------------
+#
+# 图库无法直接存 dict/list-of-dict，写入前要序列化；读回来再反序列化。
+# 这两件事必须成对且幂等，否则每次重写都会给同一个值再套一层转义，
+# 体积随之翻倍（历史上 sources 就被套到了 18 层）。
+
+_MAX_JSON_DECODE_DEPTH = 64
+
+
+def serialize_sources(values: Any) -> list[str] | None:
+    """把 sources 元素序列化成 JSON 字符串，已经序列化过的原样保留。"""
+    if not values:
+        return None
+    if not isinstance(values, list):
+        values = [values]
+    out: list[str] = []
+    for item in values:
+        if isinstance(item, str):
+            out.append(item)
+        elif hasattr(item, "model_dump"):
+            out.append(json.dumps(item.model_dump(exclude_none=True), ensure_ascii=False))
+        else:
+            out.append(json.dumps(item, ensure_ascii=False))
+    return out
+
+
+def decode_json_string(value: Any) -> Any:
+    """逐层解开被重复 json.dumps 的字符串，直到得到原始类型。
+
+    历史数据形如 ``{"type": "doc", "content": "<又一层 JSON 字符串>"}``，
+    每层只多包一个信封。这里的策略是：字符串能解析就继续；解析成
+    ``type=doc`` 且只有 type/content 两个键的信封时，沿 content 继续。
+    普通文本、以及真正的 chat 消息（带 role 等键）原样返回。
+    设置层数上限，避免脏数据造成死循环。
+    """
+    depth = 0
+    while depth < _MAX_JSON_DECODE_DEPTH:
+        if isinstance(value, str):
+            stripped = value.lstrip()
+            if not stripped or stripped[0] not in '{"[':
+                break
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                break
+            if isinstance(parsed, str) and parsed == value:
+                break
+            value = parsed
+            depth += 1
+            continue
+
+        if isinstance(value, dict):
+            inner = value.get("content")
+            is_envelope = set(value) <= {"type", "content"} and value.get("type") in (None, "doc")
+            if is_envelope and isinstance(inner, dict):
+                value = inner
+                depth += 1
+                continue
+            if (
+                is_envelope
+                and isinstance(inner, str)
+                and inner.lstrip()[:1] in {'"', "{"}
+            ):
+                try:
+                    json.loads(inner)
+                except (TypeError, ValueError):
+                    break
+                value = inner
+                depth += 1
+                continue
+
+        break
+    return value
+
+
+def decode_json_list(values: Any) -> list[Any] | None:
+    """对列表里的每个元素逐层解包（用于 sources 这类历史遗留字段）。"""
+    if not values:
+        return None
+    if not isinstance(values, list):
+        values = [values]
+    return [decode_json_string(item) for item in values]

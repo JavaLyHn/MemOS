@@ -148,3 +148,24 @@ def test_qdrant_client_cloud_init():
         VecDBFactory.from_config(config)
 
         mockclient.assert_called_once_with(url="https://cloud.qdrant.example", api_key="secret-key")
+
+
+def test_supports_text_snapshot(vec_db):
+    # Lexical indexes rely on this flag to fail fast on backends that cannot
+    # return payloads without embeddings.
+    assert vec_db.supports_text_snapshot is True
+
+
+def test_get_all_payload_only_omits_vectors(vec_db):
+    item_id = str(uuid.uuid4())
+    point = type(
+        "obj", (object,), {"id": item_id, "vector": None, "payload": {"memory": "hello"}}
+    )()
+    vec_db.client.scroll.return_value = ([point], None)
+
+    results = vec_db.get_all(with_vectors=False)
+
+    _, kwargs = vec_db.client.scroll.call_args
+    assert kwargs["with_vectors"] is False
+    assert kwargs["with_payload"] is True
+    assert results == [VecDBItem(id=item_id, vector=None, payload={"memory": "hello"})]

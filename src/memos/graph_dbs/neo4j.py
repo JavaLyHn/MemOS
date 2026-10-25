@@ -1,13 +1,14 @@
 import json
 import time
 
-from datetime import datetime
 from typing import Any, Literal
 
 from memos.configs.graph_db import Neo4jGraphDBConfig
 from memos.dependency import require_python_package
 from memos.graph_dbs.base import BaseGraphDB
 from memos.log import get_logger
+from memos.time_basis import TIME_BASIS_UTC, TIME_FIELDS, convert_legacy_node, stamp_utc_basis
+from memos.utils import decode_json_string, serialize_sources, utc_now_iso
 
 
 logger = get_logger(__name__)
@@ -20,28 +21,35 @@ def _compose_node(item: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     return node_id, memory, metadata
 
 
-def _prepare_node_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+def _prepare_node_metadata(metadata: dict[str, Any], *, stamp_basis: bool = True) -> dict[str, Any]:
     """
     Ensure metadata has proper datetime fields and normalized types.
 
     - Fill `created_at` and `updated_at` if missing (in ISO 8601 format).
     - Convert embedding to list of float if present.
+    - Stamp ``time_basis="utc"`` so readers do not have to guess whether the
+      timestamps are real UTC or pre-T1.3 wall clock (see ``memos.time_basis``).
+      Every producer on a write path builds its timestamps with ``utc_now_iso``.
+      Pass ``stamp_basis=False`` when re-importing a foreign export, whose
+      values keep whatever basis they were written with.
     """
-    now = datetime.utcnow().isoformat()
+    now = utc_now_iso()
 
     # Fill timestamps if missing
     metadata.setdefault("created_at", now)
     metadata.setdefault("updated_at", now)
+    if stamp_basis:
+        stamp_utc_basis(metadata)
 
     # Normalize embedding type
     embedding = metadata.get("embedding")
     if embedding and isinstance(embedding, list):
         metadata["embedding"] = [float(x) for x in embedding]
 
-    # serialization
-    if metadata.get("sources"):
-        for idx in range(len(metadata["sources"])):
-            metadata["sources"][idx] = json.dumps(metadata["sources"][idx])
+    # serialization（只做一次且幂等：已是字符串的不再套一层）
+    serialized = serialize_sources(metadata.get("sources"))
+    if serialized is not None:
+        metadata["sources"] = serialized
     return metadata
 
 
@@ -298,10 +306,7 @@ class Neo4jGraphDB(BaseGraphDB):
                 n += $metadata
         """
 
-        # serialization
-        if metadata.get("sources"):
-            for idx in range(len(metadata["sources"])):
-                metadata["sources"][idx] = json.dumps(metadata["sources"][idx])
+        # sources 已在 _prepare_node_metadata 里序列化过一次，这里不能再 dump
 
         with self.driver.session(database=self.db_name) as session:
             session.run(
@@ -317,9 +322,12 @@ class Neo4jGraphDB(BaseGraphDB):
         self,
         nodes: list[dict[str, Any]],
         user_name: str | None = None,
-    ) -> None:
+    ) -> list[str]:
         """
         Batch add multiple memory nodes to the graph.
+
+        Returns the ids that were prepared and written; nodes skipped during
+        preparation are omitted.
 
         Args:
             nodes: List of node dictionaries, each containing:
@@ -331,7 +339,7 @@ class Neo4jGraphDB(BaseGraphDB):
         logger.info("neo4j [add_nodes_batch] staring")
         if not nodes:
             logger.warning("[add_nodes_batch] Empty nodes list, skipping")
-            return
+            return []
 
         logger.info(f"[add_nodes_batch] Adding {len(nodes)} nodes")
 
@@ -366,10 +374,7 @@ class Neo4jGraphDB(BaseGraphDB):
                 created_at = metadata.pop("created_at")
                 updated_at = metadata.pop("updated_at")
 
-                # Serialization for sources
-                if metadata.get("sources"):
-                    for idx in range(len(metadata["sources"])):
-                        metadata["sources"][idx] = json.dumps(metadata["sources"][idx])
+                # sources 已在 _prepare_node_metadata 里序列化过一次
 
                 prepared_nodes.append(
                     {
@@ -390,7 +395,7 @@ class Neo4jGraphDB(BaseGraphDB):
 
         if not prepared_nodes:
             logger.warning("[add_nodes_batch] No valid nodes to insert after preparation")
-            return
+            return []
 
         # Batch insert using Neo4j UNWIND for better performance
         query = """
@@ -421,6 +426,7 @@ class Neo4jGraphDB(BaseGraphDB):
         except Exception as e:
             logger.error(f"[add_nodes_batch] Failed to add nodes: {e}", exc_info=True)
             raise
+        return [node["id"] for node in prepared_nodes]
 
     def update_node(self, id: str, fields: dict[str, Any], user_name: str | None = None) -> None:
         """
@@ -428,6 +434,11 @@ class Neo4jGraphDB(BaseGraphDB):
         """
         user_name = user_name if user_name else self.config.user_name
         fields = fields.copy()  # Avoid mutating external dict
+        self._convert_legacy_node(id, fields, user_name=user_name)
+        serialized = serialize_sources(fields.get("sources"))
+        if serialized is not None:
+            fields["sources"] = serialized
+        payload_fields = dict(fields)
         set_clauses = []
         params = {"id": id, "fields": fields}
 
@@ -452,6 +463,69 @@ class Neo4jGraphDB(BaseGraphDB):
         with self.driver.session(database=self.db_name) as session:
             session.run(query, **params)
 
+        self._sync_vector_payload(id, payload_fields)
+
+    def _convert_legacy_node(
+        self, id: str, fields: dict[str, Any], user_name: str | None = None
+    ) -> None:
+        """Make an updated node uniformly real UTC before the write.
+
+        Nodes written before the T1.3 fix hold Beijing wall clock labelled UTC.
+        ``fields`` carries fresh real-UTC values, so writing only those would
+        leave one node with two bases and make ``metadata.time_basis`` a lie.
+        Convert the rest of the node in the same write and stamp the marker;
+        the node is correct from then on without an offline migration.
+        """
+        node = self.get_node(id, include_embedding=False, user_name=user_name)
+        if not node:
+            # Nothing is updated by the following MATCH either; leave the caller's
+            # fields untouched rather than claiming a basis we cannot verify.
+            return
+        metadata = dict(node.get("metadata") or {})
+        if convert_legacy_node(metadata, skip=set(fields)):
+            for name in TIME_FIELDS:
+                if name in metadata and name not in fields:
+                    fields[name] = metadata[name]
+        fields["time_basis"] = TIME_BASIS_UTC
+
+    def _sync_vector_payload(self, id: str, fields: dict[str, Any]) -> None:
+        """Mirror a graph-node update into the vector payload.
+
+        The vector payload is a copy of the node properties, so a metadata or
+        status change (e.g. archiving a merged node) must be reflected there
+        too — otherwise recall keeps matching stale payloads. An embedding in
+        ``fields`` means the content changed and the point is re-upserted.
+
+        Implemented defensively: graph-only backends have no ``vec_db`` and a
+        vector failure must not fail the graph write.
+        """
+        vec_db = getattr(self, "vec_db", None)
+        if vec_db is None:
+            return
+
+        try:
+            embedding = fields.pop("embedding", None)
+            existing = vec_db.get_by_id(id)
+            # ``upsert`` replaces the whole payload, and callers (e.g. feedback)
+            # update only a handful of fields. Merge the existing payload first,
+            # otherwise tenant / status / memory_type / vector_sync disappear and
+            # the point silently stops matching recall filters.
+            payload = dict(existing.payload or {}) if existing is not None else {}
+            payload.update(fields)
+            if embedding is not None:
+                from memos.vec_dbs.item import VecDBItem
+
+                payload["vector_sync"] = "success"
+                vec_db.upsert([VecDBItem(id=id, vector=embedding, payload=payload)])
+                return
+
+            if existing is None:
+                # Not indexed (no embedding at write time or already removed).
+                return
+            vec_db.update(id, {"id": id, "payload": payload})
+        except Exception as e:
+            logger.warning(f"[update_node] Graph updated but vector payload sync failed: {e}")
+
     def delete_node(self, id: str, user_name: str | None = None) -> None:
         """
         Delete a node from the graph.
@@ -460,12 +534,14 @@ class Neo4jGraphDB(BaseGraphDB):
         """
         user_name = user_name if user_name else self.config.user_name
         query = "MATCH (n:Memory {id: $id})"
+        conditions = ["(n.status IS NULL OR n.status <> 'frozen')"]
 
         params = {"id": id}
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            query += " WHERE n.user_name = $user_name"
+            conditions.append("n.user_name = $user_name")
             params["user_name"] = user_name
 
+        query += " WHERE " + " AND ".join(conditions)
         query += " DETACH DELETE n"
 
         with self.driver.session(database=self.db_name) as session:
@@ -589,7 +665,7 @@ class Neo4jGraphDB(BaseGraphDB):
         user_name = kwargs.get("user_name")
         where_user = ""
         params = {"id": id}
-        if user_name is not None:
+        if user_name is not None and not self.config.use_multi_db:
             where_user = " AND n.user_name = $user_name"
             params["user_name"] = user_name
 
@@ -1468,7 +1544,9 @@ class Neo4jGraphDB(BaseGraphDB):
                 if not self.config.use_multi_db and (self.config.user_name or user_name):
                     metadata["user_name"] = user_name
 
-                metadata = _prepare_node_metadata(metadata)
+                # A foreign export keeps the basis its values were written with;
+                # stamping it as UTC here would misdate every imported legacy node.
+                metadata = _prepare_node_metadata(metadata, stamp_basis=False)
 
                 # Merge node and set metadata
                 created_at = metadata.pop("created_at")
@@ -1738,7 +1816,6 @@ class Neo4jGraphDB(BaseGraphDB):
         except Exception as e:
             logger.warning(f"Failed to create basic property indexes: {e}")
 
-
     def _build_user_name_and_kb_ids_conditions_cypher(
         self,
         user_name: str | None,
@@ -1828,9 +1905,12 @@ class Neo4jGraphDB(BaseGraphDB):
                             param_counter[0] += 1
                             params[param_name] = op_value
 
-                            # Check if field is a date field (created_at, updated_at, etc.)
-                            # Use datetime() function for date comparisons
-                            if key in ("created_at", "updated_at") or key.endswith("_at"):
+                            # chat_time / expires_at are string properties (the
+                            # raw text is kept when unparseable), so datetime()
+                            # would abort the whole query. ISO values compare
+                            # lexicographically; only the two core timestamps
+                            # are real Neo4j datetimes.
+                            if key in ("created_at", "updated_at"):
                                 condition_parts.append(
                                     f"datetime({node_alias}.{key}) {cypher_op} datetime(${param_name})"
                                 )
@@ -1870,6 +1950,11 @@ class Neo4jGraphDB(BaseGraphDB):
                             condition_parts.append(f"{node_alias}.{key} CONTAINS ${param_name}")
                 else:
                     # All fields are stored as flat properties in Neo4j (simple equality)
+                    if value is None:
+                        # `null` means "property is missing" (used by the owner
+                        # scope filter to include pre-migration nodes).
+                        condition_parts.append(f"{node_alias}.{key} IS NULL")
+                        continue
                     param_name = f"filter_{key}_{param_counter[0]}"
                     param_counter[0] += 1
                     params[param_name] = value
@@ -1879,33 +1964,35 @@ class Neo4jGraphDB(BaseGraphDB):
 
         param_counter = [param_counter_start]
 
-        if isinstance(filter, dict):
-            if "or" in filter:
-                # OR logic: at least one condition must match
-                or_conditions = []
-                for condition in filter["or"]:
-                    if isinstance(condition, dict):
-                        condition_str, params = build_filter_condition(condition, param_counter)
-                        if condition_str:
-                            or_conditions.append(f"({condition_str})")
-                            filter_params.update(params)
-                if or_conditions:
-                    filter_conditions.append(f"({' OR '.join(or_conditions)})")
+        def build_node(node: dict) -> str:
+            """Recursively build a WHERE fragment (supports nested and/or)."""
+            if not isinstance(node, dict) or not node:
+                return ""
 
-            elif "and" in filter:
-                # AND logic: all conditions must match
-                for condition in filter["and"]:
-                    if isinstance(condition, dict):
-                        condition_str, params = build_filter_condition(condition, param_counter)
-                        if condition_str:
-                            filter_conditions.append(f"({condition_str})")
-                            filter_params.update(params)
-            else:
-                # Handle simple dict without "and" or "or" (e.g., {"id": "xxx"})
-                condition_str, params = build_filter_condition(filter, param_counter)
-                if condition_str:
-                    filter_conditions.append(condition_str)
-                    filter_params.update(params)
+            if "or" in node:
+                children = node["or"]
+                if not isinstance(children, list):
+                    raise ValueError("filter 'or' must be an array")
+                parts = [build_node(child) for child in children if isinstance(child, dict)]
+                parts = [part for part in parts if part]
+                return f"({' OR '.join(f'({part})' for part in parts)})" if parts else ""
+
+            if "and" in node:
+                children = node["and"]
+                if not isinstance(children, list):
+                    raise ValueError("filter 'and' must be an array")
+                parts = [build_node(child) for child in children if isinstance(child, dict)]
+                parts = [part for part in parts if part]
+                return " AND ".join(f"({part})" for part in parts)
+
+            # Leaf condition: every key is ANDed with the others.
+            condition_str, params = build_filter_condition(node, param_counter)
+            filter_params.update(params)
+            return condition_str
+
+        condition_str = build_node(filter)
+        if condition_str:
+            filter_conditions.append(condition_str)
 
         return filter_conditions, filter_params
 
@@ -1918,16 +2005,9 @@ class Neo4jGraphDB(BaseGraphDB):
                 node[time_field] = node[time_field].isoformat()
         node.pop("user_name", None)
 
-        # serialization
+        # serialization：逐层解到底，历史数据可能被套了多层（见 utils.decode_json_string）
         if node.get("sources"):
-            for idx in range(len(node["sources"])):
-                if not (
-                    isinstance(node["sources"][idx], str)
-                    and node["sources"][idx][0] == "{"
-                    and node["sources"][idx][-1] == "}"
-                ):
-                    break
-                node["sources"][idx] = json.loads(node["sources"][idx])
+            node["sources"] = [decode_json_string(item) for item in node["sources"]]
 
         # 还原写入时被 json 序列化的 dict 字段（见 _deserialize_dict_field）
         for _field in _DICT_METADATA_FIELDS:
@@ -2027,8 +2107,11 @@ class Neo4jGraphDB(BaseGraphDB):
             logger.warning("[delete_node_by_prams] No WHERE conditions to delete")
             return 0
 
-        # Combine all conditions with AND
+        # Combine all conditions with AND. Frozen nodes are compliance-locked:
+        # the API rejects them explicitly, and this clause is the last line of
+        # defence for callers that go straight to the graph layer.
         data_conditions = " AND ".join([f"({clause})" for clause in where_clauses])
+        data_conditions = f"({data_conditions}) AND (n.status IS NULL OR n.status <> 'frozen')"
 
         # Add user_name filter if provided (for file_ids scenario)
         if user_name_conditions:
@@ -2042,8 +2125,12 @@ class Neo4jGraphDB(BaseGraphDB):
         logger.info(f"[delete_node_by_prams] delete_query: {delete_query}")
 
         deleted_count = 0
+        deleted_ids: list[str] = []
         try:
             with self.driver.session(database=self.db_name) as session:
+                ids_query = f"MATCH (n:Memory) WHERE {final_where} RETURN n.id AS id"
+                deleted_ids = [record["id"] for record in session.run(ids_query, **params)]
+
                 # Execute delete query
                 result = session.run(delete_query, **params)
                 # Consume the result to ensure deletion completes and get the summary
@@ -2058,6 +2145,15 @@ class Neo4jGraphDB(BaseGraphDB):
         except Exception as e:
             logger.error(f"[delete_node_by_prams] Failed to delete nodes: {e}", exc_info=True)
             raise
+
+        vec_db = getattr(self, "vec_db", None)
+        if deleted_ids and vec_db is not None:
+            try:
+                vec_db.delete(deleted_ids)
+            except Exception as e:
+                logger.warning(
+                    f"[delete_node_by_prams] Graph deleted but vector cleanup failed: {e}"
+                )
 
         logger.info(f"[delete_node_by_prams] Successfully deleted {deleted_count} nodes")
         return deleted_count
@@ -2192,7 +2288,7 @@ class Neo4jGraphDB(BaseGraphDB):
                     logger.info(f"[delete_node_by_mem_cube_id] Hard deleted {deleted_count} nodes")
                     return deleted_count
                 else:
-                    current_time = datetime.utcnow().isoformat()
+                    current_time = utc_now_iso()
 
                     query = """
                         MATCH (n:Memory)

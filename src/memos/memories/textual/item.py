@@ -4,10 +4,11 @@ import json
 import logging
 import uuid
 
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from memos.utils import decode_json_string, utc_now_iso
 
 
 ALLOWED_ROLES = {"user", "assistant", "system"}
@@ -69,16 +70,18 @@ class ArchivedTextualMemory(BaseModel):
     memory: str | None = Field(
         default_factory=lambda: "", description="The content of the archived version of the memory."
     )
-    update_type: Literal["conflict", "duplicate", "extract", "unrelated", "feedback"] = Field(
-        default="unrelated",
-        description="The type of the memory (e.g., `conflict`, `duplicate`, `extract`, `unrelated`, `feedback`).",
+    update_type: Literal["conflict", "duplicate", "extract", "unrelated", "feedback", "update"] = (
+        Field(
+            default="unrelated",
+            description="The type of the memory (e.g., `conflict`, `duplicate`, `extract`, `unrelated`, `feedback`, `update`).",
+        )
     )
     archived_memory_id: str | None = Field(
         default=None,
         description="Link to a memory node with status='archived', storing full original information, including sources and embedding.",
     )
     created_at: str | None = Field(
-        default_factory=lambda: datetime.now().isoformat(),
+        default_factory=utc_now_iso,
         description="The time the memory was created.",
     )
     timespec: dict[str, Any] | None = Field(
@@ -106,9 +109,66 @@ class TextualMemoryMetadata(BaseModel):
         default=None,
         description="The ID of the session during which the memory was created. Useful for tracking context in conversations.",
     )
-    status: Literal["activated", "resolving", "archived", "deleted"] | None = Field(
+    status: (
+        Literal[
+            "activated",
+            "resolving",
+            "archived",
+            "deleted",
+            # Lifecycle states (cloud parity). `expired` is read-only and excluded
+            # from recall; `frozen` is a compliance lock that rejects updates and
+            # deletes.
+            "expired",
+            "frozen",
+            # Dream 层专有：综合产出后标 completed，只有上下文意义时标 context_only，
+            # LLM 分析失败时标 skipped。检索侧按 status=None 放行，见 searcher PATH-G。
+            "completed",
+            "context_only",
+            "skipped",
+        ]
+        | None
+    ) = Field(
         default="activated",
-        description="The status of the memory, e.g., 'activated', 'resolving'(updating with conflicting/duplicating new memories), 'archived', 'deleted'.",
+        description="The status of the memory, e.g., 'activated', 'resolving'(updating with conflicting/duplicating new memories), 'archived', 'deleted', 'expired', 'frozen'.",
+    )
+
+    # ==== Owner / subject (cloud parity: user / agent / group / public) ====
+    owner_type: Literal["user", "agent", "group", "public"] | None = Field(
+        default=None,
+        description=(
+            "Owner scope of the memory: 'user' (private), 'agent' (agent-private), "
+            "'group' (conversation-shared) or 'public' (tenant-wide)."
+        ),
+    )
+    owner_id: str | None = Field(
+        default=None,
+        description="Id of the owner inside `owner_type` (tenant id for 'public').",
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Compatibility property: agent id associated with this memory.",
+    )
+    group_id: str | None = Field(
+        default=None,
+        description="Compatibility property: group id associated with this memory.",
+    )
+
+    # ==== Lifecycle / two-stage processing ====
+    expires_at: str | None = Field(
+        default=None,
+        description="ISO 8601 UTC expiry time. Memories past it are marked 'expired'.",
+    )
+    task_id: str | None = Field(
+        default=None,
+        description="Business task id that produced this memory (for status queries).",
+    )
+    stage: Literal["coarse", "fine"] | None = Field(
+        default=None,
+        description="Two-stage add stage: 'coarse' (immediately visible) or 'fine'.",
+    )
+    content_hash: str | None = Field(
+        default=None,
+        description="Content hash used as the two-stage idempotency key.",
     )
     is_fast: bool | None = Field(
         default=None,
@@ -126,6 +186,41 @@ class TextualMemoryMetadata(BaseModel):
         default_factory=list,
         description="Storing the archived versions of the memory. Only preserving core information of each version.",
     )
+
+    @field_validator("history", mode="before")
+    @classmethod
+    def coerce_history(cls, v):
+        """Graph stores keep each history entry as a JSON string; read them back as dicts.
+
+        Entries that cannot be parsed are dropped (one bad version must not make the
+        whole node unreadable), and an unknown ``update_type`` is normalised.
+        """
+        if v is None:
+            return []
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except ValueError:
+                return []
+        if not isinstance(v, list):
+            return []
+        allowed = set(ArchivedTextualMemory.model_fields["update_type"].annotation.__args__)
+        out = []
+        for entry in v:
+            if isinstance(entry, str):
+                try:
+                    entry = json.loads(entry)
+                except ValueError:
+                    continue
+            if isinstance(entry, ArchivedTextualMemory):
+                out.append(entry)
+            elif isinstance(entry, dict):
+                entry = dict(entry)
+                if entry.get("update_type") not in allowed:
+                    entry["update_type"] = "unrelated"
+                out.append(entry)
+        return out
+
     working_binding: str | None = Field(
         default=None,
         description="The working memory id binding of the (fast) memory.",
@@ -136,7 +231,7 @@ class TextualMemoryMetadata(BaseModel):
         default=None,
         description="A numeric score (float between 0 and 100) indicating how certain you are about the accuracy or reliability of the memory.",
     )
-    source: Literal["conversation", "retrieved", "web", "file", "system"] | None = Field(
+    source: Literal["conversation", "retrieved", "web", "file", "system", "dream"] | None = Field(
         default=None, description="The origin of the memory"
     )
     tags: list[str] | None = Field(
@@ -147,12 +242,31 @@ class TextualMemoryMetadata(BaseModel):
         default=None, description="e.g., 'private', 'public', 'session'"
     )
     updated_at: str | None = Field(
-        default_factory=lambda: datetime.now().isoformat(),
+        default_factory=utc_now_iso,
         description="The timestamp of the last modification to the memory. Useful for tracking memory freshness or change history. Format: ISO 8601.",
+    )
+    chat_time: str | None = Field(
+        default=None,
+        description=(
+            "Event time of the conversation turn(s) this memory was extracted from. "
+            "Populated from the input messages' `chat_time` and normalized to ISO 8601 "
+            "UTC when parseable. Unlike `created_at` (when the memory row was written), "
+            "this tracks when the underlying event happened."
+        ),
     )
     info: dict | None = Field(
         default=None,
         description="Arbitrary key-value pairs for additional metadata.",
+    )
+    time_basis: Literal["utc", "legacy_local"] | None = Field(
+        default=None,
+        description=(
+            "How to read every timestamp in this metadata. 'utc' = real UTC (all "
+            "writes stamp this); 'legacy_local' or absent = Beijing wall clock "
+            "mislabelled as UTC by nodes written before the T1.3 fix. Kept as None "
+            "by default so an unmarked node read from the store stays unmarked "
+            "instead of being relabelled; the graph write path stamps it."
+        ),
     )
     internal_info: dict | None = Field(
         default=None,
@@ -186,6 +300,12 @@ class TreeNodeTextualMemoryMetadata(TextualMemoryMetadata):
         "SkillMemory",
         "PreferenceMemory",
         "Context",
+        # 事件记忆：从对话实时抽取的结构化事件（cloud `event` 视图）。
+        "EventMemory",
+        # 日度跨案例综合与由它派生的洞察。这两类不进 text_mem，只走 dream_mem 附加位，
+        # 见 searcher._retrieve_from_dream_memory。
+        "DreamDiary",
+        "InsightMemory",
     ] = Field(default="WorkingMemory", description="Memory lifecycle type.")
     sources: list[SourceMessage] | None = Field(
         default=None, description="Multiple origins of the memory (e.g., URLs, notes)."
@@ -195,7 +315,7 @@ class TreeNodeTextualMemoryMetadata(TextualMemoryMetadata):
         description="The vector embedding of the memory content, used for semantic search or clustering.",
     )
     created_at: str | None = Field(
-        default_factory=lambda: datetime.now().isoformat(),
+        default_factory=utc_now_iso,
         description="The timestamp of the first creation to the memory. Useful "
         "for tracking memory initialization. Format: ISO 8601.",
     )
@@ -211,6 +331,30 @@ class TreeNodeTextualMemoryMetadata(TextualMemoryMetadata):
     file_ids: list[str] | None = Field(
         default_factory=list,
         description="The ids of the files associated with the memory.",
+    )
+
+    # ==== Version chain / validity (cloud parity: time-aware memory) ====
+    # All optional. A node without them is a "state" that became valid when it was
+    # said (`chat_time`, else `created_at`) and is still valid.
+    memory_form: Literal["state", "event"] | None = Field(
+        default=None,
+        description="'state' is a fact that can be replaced by a newer value (where the user lives); 'event' is a one-off occurrence that is never superseded (a business trip).",
+    )
+    valid_from: str | None = Field(
+        default=None,
+        description="ISO 8601 UTC time from which the current text became true.",
+    )
+    valid_to: str | None = Field(
+        default=None,
+        description="ISO 8601 UTC time at which the text stopped being true; empty while it is current.",
+    )
+    event_time_start: str | None = Field(
+        default=None,
+        description="ISO 8601 UTC start of the occurrence this event memory describes.",
+    )
+    event_time_end: str | None = Field(
+        default=None,
+        description="ISO 8601 UTC end of the occurrence this event memory describes.",
     )
 
     @field_validator("sources", mode="before")
@@ -251,10 +395,9 @@ class TreeNodeTextualMemoryMetadata(TextualMemoryMetadata):
                 out.append(SourceMessage(**d))
 
             elif isinstance(item, str):
-                try:
-                    parsed = json.loads(item)
-                except Exception:
-                    parsed = None
+                # 历史数据可能被重复 json.dumps 过（sources 被套到十几层），
+                # 只解一层会把整条转义串当成 content，这里逐层解到底。
+                parsed = decode_json_string(item)
 
                 if isinstance(parsed, dict):
                     if parsed.get("type") is None:

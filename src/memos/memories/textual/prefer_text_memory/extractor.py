@@ -3,7 +3,6 @@ import uuid
 
 from abc import ABC, abstractmethod
 from concurrent.futures import as_completed
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from memos.context.context import ContextThreadPoolExecutor
@@ -23,6 +22,7 @@ from memos.templates.prefer_complete_prompt import (
     NAIVE_IMPLICIT_PREFERENCE_EXTRACT_PROMPT_ZH,
 )
 from memos.types import MessageList
+from memos.utils import utc_now_iso
 
 
 if TYPE_CHECKING:
@@ -53,10 +53,19 @@ class NaiveExtractor(BaseExtractor):
 
     def extract_basic_info(self, qa_pair: MessageList) -> dict[str, Any]:
         """Extract basic information from a QA pair (no LLM needed)."""
+        chat_time = None
+        for message in qa_pair or []:
+            if isinstance(message, dict):
+                chat_time = message.get("chat_time")
+            else:
+                chat_time = getattr(message, "chat_time", None)
+            if chat_time:
+                break
         basic_info = {
             "dialog_id": str(uuid.uuid4()),
             "original_text": convert_messages_to_string(qa_pair),
-            "created_at": datetime.now().isoformat(),
+            "created_at": utc_now_iso(),
+            "chat_time": chat_time,
         }
 
         return basic_info

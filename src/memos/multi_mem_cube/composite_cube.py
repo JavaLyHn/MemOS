@@ -43,6 +43,19 @@ class CompositeCubeView(MemCubeView):
 
         return all_results
 
+    def extract_memories(self, add_req: APIADDRequest) -> list[dict[str, Any]]:
+        """Dry-run extraction fan-out; nothing is persisted for any cube."""
+        all_results: list[dict[str, Any]] = []
+        for idx, view in enumerate(self.cube_views):
+            self.logger.info(
+                "[CompositeCubeView] fan-out extract to cube=%s (%d/%d)",
+                view.cube_id,
+                idx + 1,
+                len(self.cube_views),
+            )
+            all_results.extend(view.extract_memories(add_req))
+        return all_results
+
     def search_memories(self, search_req: APISearchRequest) -> dict[str, Any]:
         # aggregated MOSSearchResult
         merged_results: dict[str, Any] = {
@@ -53,6 +66,9 @@ class CompositeCubeView(MemCubeView):
             "pref_note": "",
             "tool_mem": [],
             "skill_mem": [],
+            "dream_mem": [],
+            "event_mem": [],
+            "profile_mem": [],
         }
 
         def _search_single_cube(view: SingleCubeView) -> dict[str, Any]:
@@ -73,6 +89,9 @@ class CompositeCubeView(MemCubeView):
                 merged_results["pref_mem"].extend(cube_result.get("pref_mem", []))
                 merged_results["tool_mem"].extend(cube_result.get("tool_mem", []))
                 merged_results["skill_mem"].extend(cube_result.get("skill_mem", []))
+                merged_results["dream_mem"].extend(cube_result.get("dream_mem", []))
+                merged_results["event_mem"].extend(cube_result.get("event_mem", []))
+                merged_results["profile_mem"].extend(cube_result.get("profile_mem", []))
                 note = cube_result.get("pref_note")
                 if note:
                     if merged_results["pref_note"]:

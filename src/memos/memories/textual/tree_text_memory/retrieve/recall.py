@@ -116,6 +116,7 @@ class GraphMemoryRetriever:
             "RawFileMemory",
             "SkillMemory",
             "PreferenceMemory",
+            "EventMemory",
         ]:
             raise ValueError(f"Unsupported memory scope: {memory_scope}")
 
@@ -137,6 +138,7 @@ class GraphMemoryRetriever:
                 parsed_goal,
                 memory_scope,
                 user_name,
+                search_filter=search_filter,
                 use_fast_graph=use_fast_graph,
             )
             # Vector similarity search
@@ -157,7 +159,8 @@ class GraphMemoryRetriever:
                     memory_scope,
                     top_k=top_k,
                     user_name=user_name,
-                    search_filter=id_filter,
+                    id_filter=id_filter,
+                    search_filter=search_filter,
                 )
             if use_fast_graph:
                 future_fulltext = executor.submit(
@@ -204,7 +207,12 @@ class GraphMemoryRetriever:
         return list(combined.values())
 
     def _graph_recall(
-        self, parsed_goal: ParsedTaskGoal, memory_scope: str, user_name: str | None = None, **kwargs
+        self,
+        parsed_goal: ParsedTaskGoal,
+        memory_scope: str,
+        user_name: str | None = None,
+        search_filter: dict | None = None,
+        **kwargs,
     ) -> list[TextualMemoryItem]:
         """
         Perform structured node-based retrieval from Neo4j.
@@ -249,7 +257,7 @@ class GraphMemoryRetriever:
                 # 传 status="activated" 只剩 1 条；按 tags 查时 10 条里 8 条 archived、2 条 deleted。
                 # 线上 FAST_GRAPH 未设置 → 走的就是这个分支，fast 分支（下面 else 里）本来就有。
                 key_ids = self.graph_store.get_by_metadata(
-                    key_filters, user_name=user_name, status="activated"
+                    key_filters, user_name=user_name, status="activated", filter=search_filter
                 )
                 candidate_ids.update(key_ids)
 
@@ -260,7 +268,7 @@ class GraphMemoryRetriever:
                     {"field": "memory_type", "op": "=", "value": memory_scope},
                 ]
                 tag_ids = self.graph_store.get_by_metadata(
-                    tag_filters, user_name=user_name, status="activated"
+                    tag_filters, user_name=user_name, status="activated", filter=search_filter
                 )
                 candidate_ids.update(tag_ids)
 
@@ -301,7 +309,7 @@ class GraphMemoryRetriever:
                     {"field": "memory_type", "op": "=", "value": memory_scope},
                 ]
                 key_ids = self.graph_store.get_by_metadata(
-                    key_filters, user_name=user_name, status="activated"
+                    key_filters, user_name=user_name, status="activated", filter=search_filter
                 )
                 candidate_ids.update(key_ids)
 
@@ -312,7 +320,7 @@ class GraphMemoryRetriever:
                     {"field": "memory_type", "op": "=", "value": memory_scope},
                 ]
                 tag_ids = self.graph_store.get_by_metadata(
-                    tag_filters, user_name=user_name, status="activated"
+                    tag_filters, user_name=user_name, status="activated", filter=search_filter
                 )
                 candidate_ids.update(tag_ids)
 
@@ -511,10 +519,16 @@ class GraphMemoryRetriever:
         memory_scope: str,
         top_k: int = 20,
         user_name: str | None = None,
+        id_filter: dict | None = None,
         search_filter: dict | None = None,
     ) -> list[TextualMemoryItem]:
         """
         Perform BM25-based retrieval.
+
+        ``id_filter`` keeps its historical role (user/session narrowing and
+        corpus naming). ``search_filter`` is the compiled metadata filter
+        (including the owner scope) and is applied inside the graph query, so
+        BM25 can never rank nodes outside the viewer's scope.
         """
         if not self.bm25_retriever:
             return []
@@ -523,13 +537,16 @@ class GraphMemoryRetriever:
         ]
         # corpus_name is user_name + user_id
         corpus_name = f"{user_name}" if user_name else ""
-        if search_filter is not None:
-            for key in search_filter:
-                value = search_filter[key]
+        if id_filter is not None:
+            for key in id_filter:
+                value = id_filter[key]
                 key_filters.append({"field": key, "op": "=", "value": value})
-            corpus_name += "".join(list(search_filter.values()))
+            corpus_name += "".join(str(value) for value in id_filter.values())
         candidate_ids = self.graph_store.get_by_metadata(
-            key_filters, user_name=user_name, status="activated"
+            key_filters,
+            user_name=user_name,
+            status="activated",
+            filter=search_filter,
         )
         node_dicts = self.graph_store.get_nodes(
             list(candidate_ids), include_embedding=self.include_embedding, user_name=user_name

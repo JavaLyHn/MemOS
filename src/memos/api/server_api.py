@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from starlette.staticfiles import StaticFiles
 
+from memos.api.contract import CONTRACT_VERSION
 from memos.api.exceptions import APIExceptionHandler
 from memos.api.lifecycle import shutdown_components
 from memos.api.middleware.request_context import RequestContextMiddleware
@@ -57,6 +58,7 @@ def health_check():
         "status": "healthy",
         "service": "memos",
         "version": app.version,
+        "contract_version": CONTRACT_VERSION,
     }
 
 

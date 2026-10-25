@@ -415,3 +415,27 @@ class TestServerRouterGetAll:
         data = response.json()
         assert data["message"] == "Memories retrieved successfully"
         assert isinstance(data["data"], list)
+
+
+class TestServerRouterExtract:
+    """Test the dry-run /product/extract_memory endpoint."""
+
+    def test_extract_memory_dispatches_to_add_handler(self, mock_handlers, client):
+        mock_handlers["add"].handle_extract_memories.return_value = MemoryResponse(
+            message="Memory extraction completed successfully",
+            data=[{"memory": "x", "metadata": {"memory_type": "UserMemory"}}],
+        )
+
+        response = client.post(
+            "/product/extract_memory",
+            json={"user_id": "test_user", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["message"] == "Memory extraction completed successfully"
+        mock_handlers["add"].handle_extract_memories.assert_called_once()
+
+    def test_extract_memory_requires_messages(self, mock_handlers, client):
+        response = client.post("/product/extract_memory", json={"user_id": "test_user"})
+
+        assert response.status_code == 422

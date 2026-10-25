@@ -27,6 +27,16 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_TOOL_SCHEMA_BLOCK = re.compile(r"<tool_schema>(.*?)</tool_schema>", re.DOTALL)
+
+
+def _tool_schema_id(tenant: str | None, user_id: str, schema: Any, schema_hash: str) -> str:
+    function = schema.get("function") if isinstance(schema, dict) else None
+    source = function if isinstance(function, dict) else schema
+    tool_name = str(source.get("name", "")) if isinstance(source, dict) else ""
+    key = f"toolschema:{tenant or ''}|{user_id}|{tool_name}|{schema_hash[:32]}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
 
 class SystemParser(BaseMessageParser):
     """Parser for system messages."""
@@ -262,6 +272,29 @@ class SystemParser(BaseMessageParser):
         # Return empty list to defer to parse_fine for actual storage
         return []
 
+    def tool_schema_items(
+        self, messages: list[Any], info: dict[str, Any], **kwargs
+    ) -> list[TextualMemoryItem]:
+        """``ToolSchemaMemory`` items for every ``<tool_schema>`` block in the system messages.
+
+        ``parse_fast`` keeps system messages out of the fast layer, so no fast item carries a
+        system source and ``process_transfer`` never reaches ``parse_fine``. The ids are
+        deterministic, so a schema repeated in a later request lands on the same node.
+        """
+        items: dict[str, TextualMemoryItem] = {}
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "system":
+                continue
+            content = message.get("content", "")
+            if isinstance(content, dict):
+                content = content.get("text", "")
+            if not isinstance(content, str):
+                continue
+            for block in _TOOL_SCHEMA_BLOCK.findall(content):
+                for item in self.parse_fine({**message, "content": block}, info, **kwargs):
+                    items[item.id] = item
+        return list(items.values())
+
     def parse_fine(
         self,
         message: ChatCompletionSystemMessageParam,
@@ -296,25 +329,30 @@ class SystemParser(BaseMessageParser):
         manager_user_id = user_context.manager_user_id if user_context else None
         project_id = user_context.project_id if user_context else None
 
-        # Deduplicate tool schemas based on memory content
-        # Use hash as key for efficiency, but store original string to handle collisions
-        seen_memories = {}  # hash -> memory_str mapping
-        unique_schemas = []
+        # Ids are derived from tenant + user + tool name + schema hash, so the same schema sent
+        # in a later request lands on the same node instead of adding a duplicate.
+        tenant = (user_context.mem_cube_id if user_context else None) or kwargs.get("user_name")
+        seen_hashes: set[str] = set()
+        unique_schemas: list[tuple[dict, str]] = []
         for schema in tool_schema:
             memory_str = json.dumps(schema, ensure_ascii=False, sort_keys=True)
-            # Use SHA-256 for better collision resistance
             memory_hash = hashlib.sha256(memory_str.encode("utf-8")).hexdigest()
+            if memory_hash not in seen_hashes:
+                seen_hashes.add(memory_hash)
+                unique_schemas.append((schema, memory_hash))
 
-            # Check if hash exists and verify the actual content (handle potential collision)
-            if memory_hash not in seen_memories:
-                seen_memories[memory_hash] = memory_str
-                unique_schemas.append(schema)
-            elif seen_memories[memory_hash] != memory_str:
-                unique_schemas.append(schema)
+        candidates = [
+            (_tool_schema_id(tenant, user_id, schema, memory_hash), schema)
+            for schema, memory_hash in unique_schemas
+        ]
+        # The id already says whether the schema is stored, so look that up before paying for
+        # an embedding per tool on every request.
+        existing_ids = kwargs.get("existing_ids")
+        known = existing_ids([schema_id for schema_id, _ in candidates]) if existing_ids else set()
 
         return [
             TextualMemoryItem(
-                id=str(uuid.uuid4()),
+                id=schema_id,
                 memory=json.dumps(schema, ensure_ascii=False),
                 metadata=TreeNodeTextualMemoryMetadata(
                     user_id=user_id,
@@ -327,5 +365,6 @@ class SystemParser(BaseMessageParser):
                     project_id=project_id,
                 ),
             )
-            for schema in unique_schemas
+            for schema_id, schema in candidates
+            if schema_id not in known
         ]

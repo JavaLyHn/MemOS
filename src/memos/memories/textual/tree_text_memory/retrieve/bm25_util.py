@@ -1,3 +1,4 @@
+import hashlib
 import threading
 
 import numpy as np
@@ -11,8 +12,28 @@ from memos.utils import timed
 
 
 logger = get_logger(__name__)
-# Global model cache
+# 进程级缓存：cache_key -> BM25Okapi（或 None 表示该语料没有可索引的文本）
+_BM25_CACHE = None
+_CACHE_MAX_SIZE = 100
 _CACHE_LOCK = threading.Lock()
+
+
+def _get_cache():
+    global _BM25_CACHE
+    if _BM25_CACHE is None:
+        from cachetools import LRUCache
+
+        _BM25_CACHE = LRUCache(maxsize=_CACHE_MAX_SIZE)
+    return _BM25_CACHE
+
+
+def _corpus_fingerprint(corpus: list[str]) -> str:
+    """语料内容指纹，用来判断缓存里的 BM25 索引是否还对应当前这批文档。"""
+    digest = hashlib.sha1()
+    for doc in corpus:
+        digest.update(doc.encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
 
 
 class EnhancedBM25:
@@ -24,15 +45,14 @@ class EnhancedBM25:
         Initialize Enhanced BM25 with memory management
         """
         if tokenizer is None:
-            self.tokenizer = FastTokenizer()
+            # 只有 BM25 检索启用 jieba 搜索模式; 其它模块仍用上游精确分词。
+            self.tokenizer = FastTokenizer(search_mode=True)
         else:
             self.tokenizer = tokenizer
         self._current_tfidf = None
 
-        global _BM25_CACHE
-        from cachetools import LRUCache
-
-        _BM25_CACHE = LRUCache(maxsize=100)
+        # 缓存是进程级的：每 new 一个 EnhancedBM25 就重置一次会让索引反复重建。
+        _get_cache()
 
     def _tokenize_doc(self, text):
         """
@@ -40,29 +60,57 @@ class EnhancedBM25:
         """
         return self.tokenizer.tokenize_mixed(text, lang="auto")
 
-    @require_python_package(import_name="rank_bm25", install_command="pip install rank_bm25")
+    @staticmethod
+    def _cache_key(corpus_name: str, corpus: list[str]) -> tuple[str, str]:
+        """缓存键 = 语料名 + 内容指纹。
+
+        只按 corpus_name 缓存时，同一用户新增/删除记忆后仍会命中旧快照，
+        BM25 的下标会映射到旧语料的顺序上。指纹是 O(N)，远低于重新分词与建索引。
+        """
+        return (corpus_name, _corpus_fingerprint(corpus))
+
+    @require_python_package(import_name="rank_bm25", install_command="pip install rank-bm25")
     def _prepare_corpus_data(self, corpus, corpus_name="default"):
         from rank_bm25 import BM25Okapi
 
+        cache_key = self._cache_key(corpus_name, corpus)
         with _CACHE_LOCK:
-            if corpus_name in _BM25_CACHE:
-                print("hit::", corpus_name)
-                return _BM25_CACHE[corpus_name]
-            print("not hit::", corpus_name)
+            cache = _get_cache()
+            if cache_key in cache:
+                logger.debug("[bm25] corpus cache hit: %s (%d docs)", corpus_name, len(corpus))
+                return cache[cache_key]
 
+            logger.debug("bm25 cache miss: %s (%d docs)", corpus_name, len(corpus))
             tokenized_corpus = [self._tokenize_doc(doc) for doc in corpus]
+            logger.debug("[bm25] corpus cache miss: %s (%d docs)", corpus_name, len(corpus))
+            tokenized_corpus = [self._tokenize_doc(doc) for doc in corpus]
+            if not any(tokenized_corpus):
+                # 全是空文档时 BM25Okapi 的 avgdl 为 0，会算出 NaN 分数
+                cache[cache_key] = None
+                return None
+
             bm25_model = BM25Okapi(tokenized_corpus)
-            _BM25_CACHE[corpus_name] = bm25_model
+            cache[cache_key] = bm25_model
             return bm25_model
 
+    def clear_cache(self, corpus_name=None):
+        """清掉某个语料名的全部版本；不传则清空整个进程级缓存。"""
+        with _CACHE_LOCK:
+            cache = _get_cache()
+            if corpus_name is None:
+                cache.clear()
+                return
+            for key in [k for k in cache if k[0] == corpus_name]:
+                del cache[key]
 
     def get_cache_info(self):
         """Get current cache information"""
         with _CACHE_LOCK:
+            cache = _get_cache()
             return {
-                "cache_size": len(_BM25_CACHE),
-                "max_cache_size": 100,
-                "cached_corpora": list(_BM25_CACHE.keys()),
+                "cache_size": len(cache),
+                "max_cache_size": _CACHE_MAX_SIZE,
+                "cached_corpora": sorted({key[0] for key in cache}),
             }
 
     def _search_docs(
@@ -81,7 +129,7 @@ class EnhancedBM25:
             corpus: List of document texts
             top_k: Number of top results to return
             rerank_candidates_multiplier: Multiplier for candidate selection
-            cleanup: Whether to cleanup memory after search (default: True)
+            cleanup: 检索结束后是否释放临时 TF-IDF 矩阵
         """
         if not corpus:
             return []
@@ -91,15 +139,31 @@ class EnhancedBM25:
         try:
             # Prepare BM25 model
             bm25_model = self._prepare_corpus_data(corpus, corpus_name=corpus_name)
+            if bm25_model is None:
+                return []
+
             tokenized_query = self._tokenize_doc(query)
             tokenized_query = list(dict.fromkeys(tokenized_query))
 
             # Get BM25 scores
             bm25_scores = bm25_model.get_scores(tokenized_query)
 
+            # argsort 对全 0 分数会按原始下标返回：与查询毫无词重叠的文档必须剔掉，
+            # 否则每次查询都会往候选池里塞一批无关记忆，白耗 rerank 预算。
+            # 这里按词重叠判断而不是按 score > 0 判断——某个词的 idf 恰好为 0 时
+            # （df == corpus_size / 2）分数也是 0，那是合法命中。
+            query_terms = set(tokenized_query)
+            matched = np.array(
+                [
+                    bool(query_terms.intersection(freqs))
+                    for freqs in getattr(bm25_model, "doc_freqs", [{}] * len(corpus))
+                ]
+            )
+
             # Select candidates
             candidate_count = min(top_k * rerank_candidates_multiplier, len(corpus))
             candidate_indices = np.argsort(bm25_scores)[-candidate_count:][::-1]
+            candidate_indices = candidate_indices[matched[candidate_indices]]
             combined_scores = bm25_scores[candidate_indices]
 
             if use_tfidf:
@@ -149,9 +213,28 @@ class EnhancedBM25:
             logger.error(f"BM25 search failed: {e}")
             return []
         finally:
-            # Always cleanup if requested
             if cleanup:
                 self._cleanup_memory()
+
+    @staticmethod
+    def _node_to_doc(node_dict: dict) -> str:
+        """把图节点摊平成 BM25 文档。
+
+        生产图里只有一部分节点带 ``key``（preference / topic 类节点只有 topic 或
+        memory），所以按 key -> topic -> memory 逐级退化；不能因为个别节点缺字段
+        就让整批召回丢失。文档顺序必须与 node_dicts 一一对应（doc_index 靠它回查），
+        因此这里不过滤空文档。
+        """
+        metadata = node_dict.get("metadata") or {}
+        head = metadata.get("key") or metadata.get("topic") or node_dict.get("memory") or ""
+        tags = metadata.get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        return " ".join([str(head), *(str(tag) for tag in tags)]).strip()
+
+    def _cleanup_memory(self):
+        """释放本次检索临时持有的 TF-IDF 矩阵。"""
+        self._current_tfidf = None
 
     @timed
     def search(self, query: str, node_dicts: list[dict], corpus_name="default", **kwargs):
@@ -159,20 +242,11 @@ class EnhancedBM25:
         Search with BM25 and optional TF-IDF reranking
         """
         try:
-            corpus_list = []
-            for node_dict in node_dicts:
-                corpus_list.append(
-                    " ".join([node_dict["metadata"]["key"]] + node_dict["metadata"]["tags"])
-                )
-
+            corpus_list = [self._node_to_doc(node_dict) for node_dict in node_dicts]
             recalled_results = self._search_docs(
                 query, corpus_list, corpus_name=corpus_name, **kwargs
             )
-            bm25_searched_nodes = []
-            for item in recalled_results:
-                doc_idx = item["doc_index"]
-                bm25_searched_nodes.append(node_dicts[doc_idx])
-            return bm25_searched_nodes
+            return [node_dicts[item["doc_index"]] for item in recalled_results]
         except Exception as e:
             logger.error(f"Error in bm25 search: {e}")
             return []

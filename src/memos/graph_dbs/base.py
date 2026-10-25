@@ -303,9 +303,15 @@ class BaseGraphDB(ABC):
         """
 
     @abstractmethod
-    def add_nodes_batch(self, nodes: list[dict[str, Any]], user_name: str | None = None) -> None:
+    def add_nodes_batch(
+        self, nodes: list[dict[str, Any]], user_name: str | None = None
+    ) -> list[str]:
         """
         Batch add multiple memory nodes to the graph.
+
+        Returns the ids that were actually written. Implementations that tolerate
+        per-node preparation errors must omit the skipped ids, so callers never
+        report a node as persisted when it was not.
 
         Args:
             nodes: List of node dictionaries, each containing:
