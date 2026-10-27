@@ -1,0 +1,4 @@
+server/backend/** text eol=lf
+docs/superpowers/** text eol=lf
+# Unified-diff context lines intentionally contain a leading space on empty lines.
+*.patch -whitespace

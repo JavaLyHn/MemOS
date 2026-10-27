@@ -1,0 +1,745 @@
+diff --git a/deploy/mcp-gateway/.gitignore b/deploy/mcp-gateway/.gitignore
+index aea65a4..b59b7c3 100644
+--- a/deploy/mcp-gateway/.gitignore
++++ b/deploy/mcp-gateway/.gitignore
+@@ -3,3 +3,8 @@ tenants.conf
+ 
+ __pycache__/
+ **/__pycache__/
++
++# Publication coordination and crash-left credential temporary files
++tenants.conf.lock
++tenants.conf.pending
++tenants.conf.*.tmp
+diff --git a/deploy/mcp-gateway/README.md b/deploy/mcp-gateway/README.md
+index 8cc92b4..c5579e0 100644
+--- a/deploy/mcp-gateway/README.md
++++ b/deploy/mcp-gateway/README.md
+@@ -99,6 +99,7 @@ python3 memos_gateway.py --transport http --host 0.0.0.0 --port 8003
+ | 变量 | 默认 | 说明 |
+ |---|---|---|
+ | `MEMOS_TENANTS` | 空（必填） | token → user_id 映射，`tok-a:alice,tok-b:bob` 或 JSON 两种写法皆可 |
++| `MEMOS_TENANTS_FILE` | 仓库旁 `tenants.conf` | dashboard 合成下发的租户清单文件（形状 = `MEMOS_TENANTS` 的 JSON 写法）；置空字符串则不读文件 |
+ | `MEMOS_API_BASE_URL` | `http://localhost:8000` | 后端 MemOS 服务地址 |
+ | `MEMORY_CALL_LOG_DIR` | `/var/log/memos-gateway` | 调用日志落盘目录 |
+ | `MEMORY_SERVICE_NAME` | `MemoryService` | 对客户端展示的服务名 |
+@@ -124,6 +125,18 @@ memos-zzzzzzzz:demo-agent-zhang  ← 不同 user_id = 各自独立
+ 
+ 改完 `MEMOS_TENANTS` 必须重启进程：环境变量不会热更新。
+ 
++#### `tenants.conf`（dashboard 管理的接口密钥清单）
++
++dashboard 的「接口密钥」功能以**项目即身份**的方式自动维护这份文件
++（`{"token": {"user_id": 项目, "cube_id": 项目}}`，与 `MEMOS_TENANTS` 的 JSON 写法同形）：
++
++- 网关启动时把 env 与文件**合并**：两处来源并存，同一个 token 在两处且身份一致 → 去重；
++  同一个 token 身份不一致 → **拒绝启动**（错误信息带 `MEMOS_TENANTS` 与 `tenants.conf` 双来源点名，token 以掩码呈现）。
++- 文件缺席不算错误（当作空清单）；坏 JSON 才是。
++- 文件在仓库 `.gitignore` 里（token 语义不入库）。
++- dashboard 是该文件的**单向权威**：dashboard 重启会按其库内 active 密钥重写整份文件，
++  手工加进文件里的 token 会被拭除；手工管理的 token 请走 `MEMOS_TENANTS`。
++
+ ### 改网关代码
+ 
+ 改 `gateway/` 下对应模块（入口仍是 `memos_gateway.py`），重启进程即生效。
+@@ -198,6 +211,48 @@ calls-YYYYMMDD.jsonl
+ | `gateway/mcp_api/http.py` | `/` 落地页、`/health` |
+ | `gateway/identity.py` | token → Caller |
+ | `test_gateway_contract.py` | 工具名 / 签名 / docstring / 对外文案锁 |
++| `test_gateway_tenants_file.py` | tenants.conf 读取与 env 合并（不依赖 fastmcp） |
+ | `test_gateway_tools.py` | 工具 payload 与失败语义（不连后端） |
+ | `test_gateway_audit.py` | 审计截断 / JSONL fsync |
+ | `prompt_regression_test.py` | 工具描述的模型行为回归 |
++
++
++### Dashboard credential publication (Task14 repair, 2026-10-27)
++
++Dashboard and gateway coordinate through the same `tenants.conf.lock` first-byte advisory lock
++(Windows msvcrt / POSIX flock). The shared configuration directory must support this coordination
++file. Startup readers wait for publication to finish; live authentication uses a nonblocking lock.
++A `tenants.conf.pending` marker means a transaction
++or reconciliation has not been confirmed: gateway startup refuses the file instead of accepting
++possibly orphaned credentials. Dashboard startup or a subsequent successful mutation reconciles
++from committed SQLite state. A process crash releases the OS lock; the pending marker remains
++until reconciliation. This is a publication/compensation protocol, not a cross-filesystem database
++transaction or an assurance about power-loss durability.
++
++Parser errors for both environment and file mappings never include the original credential.
++Unchanged legacy credentials continue to work, including an omitted/null cube defaulting to user.
++File-backed credentials reload automatically before each authenticated request. Changes to
++MEMOS_TENANTS environment variables still require a process restart.
++
++### Automatic credential reload
++
++The verifier checks the file identity, size, nanosecond modification/change times and pending
++marker on every authentication request. An unchanged publication is not reparsed. Changes are
++read under the shared publication lock and swapped as a complete in-memory snapshot; disk work
++runs off the async event loop. No watcher process, management endpoint or new dependency is needed.
++
++- Dashboard key creation works on the next request after its successful publication; revocation
++  rejects subsequent requests, including requests made by already-connected MCP clients.
++- A rename does not change the credential publication or interrupt its authorization.
++- A missing, unreadable, malformed, conflicting or pending file temporarily disables file-backed
++  credentials instead of retaining potentially revoked keys. Environment-backed identities remain
++  available. A later confirmed publication automatically recovers without a restart.
++- An empty file stays authenticated: it does not silently turn off authentication. Environment
++  identities are independent; removing a duplicate file entry does not revoke its environment copy.
++- Requests already authorized may finish; reload does not cancel their side effects. Unchanged
++  public health/landing endpoints do not trigger a reload and reflect the latest auth snapshot.
++- Deploying this code requires one initial gateway restart. Afterwards dashboard key publication
++  needs no gateway restart. All workers detect the shared file independently on their next request.
++
++Regression: `python -m pytest test_gateway_live_reload.py test_gateway_tenants_file.py
++test_gateway_contract.py test_gateway_tools.py -q` (from this directory).
+diff --git a/deploy/mcp-gateway/gateway/app.py b/deploy/mcp-gateway/gateway/app.py
+index 5d000b5..1490d19 100644
+--- a/deploy/mcp-gateway/gateway/app.py
++++ b/deploy/mcp-gateway/gateway/app.py
+@@ -5,17 +5,19 @@ from __future__ import annotations
+ from dataclasses import dataclass
+ 
+ from fastmcp import FastMCP
+-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+ 
+ from .audit.facade import Auditor
+ from .backend import ProductClient
+-from .config import Settings, settings as default_settings
++from .config import Settings
++from .config import settings as default_settings
+ from .domain.tenants import TenantRegistry
+ from .identity import IdentityResolver
++from .live_auth import ReloadingTokenVerifier
+ from .mcp_api.http import PublicPages
+ from .mcp_api.tools import register as register_tools
+ from .service import MemoryService
+ 
++
+ INSTRUCTIONS = (
+     "长期记忆服务。回答用户前先调用 search_memory 检索相关记忆；"
+     "用户明确要求记住某事时调用 add_message。"
+@@ -39,16 +41,13 @@ class App:
+ 
+ def build_app(settings: Settings | None = None) -> App:
+     settings = settings or default_settings
+-    tenants = TenantRegistry.from_raw(settings.tenants_raw)
++    # env(MEMOS_TENANTS) 为主，dashboard 合成下发的 tenants.conf 为辅；token 冲突直接拒启。
++    tenants = TenantRegistry.from_sources(settings.tenants_raw, settings.tenants_file)
+     identity = IdentityResolver(settings)
+     memory = MemoryService(ProductClient(settings), settings)
+     auditor = Auditor(settings, tenants, identity)
+ 
+-    verifier = (
+-        StaticTokenVerifier(tokens=tenants.verifier_tokens())
+-        if tenants
+-        else None
+-    )
++    verifier = ReloadingTokenVerifier(tenants) if tenants or settings.tenants_file else None
+     mcp = FastMCP(
+         name=settings.service_name,
+         instructions=INSTRUCTIONS,
+diff --git a/deploy/mcp-gateway/gateway/config.py b/deploy/mcp-gateway/gateway/config.py
+index b1ddbad..2d117d3 100644
+--- a/deploy/mcp-gateway/gateway/config.py
++++ b/deploy/mcp-gateway/gateway/config.py
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ import os
+ import time
+ from dataclasses import dataclass
++from pathlib import Path
+ 
+ 
+ @dataclass(frozen=True)
+@@ -20,6 +21,8 @@ class Settings:
+     query_prefix: str
+     tenants_raw: str
+     started_at: float
++    # dashboard 合成下发的清单文件（"" = 不读文件）。env 缺省即仓库旁的 tenants.conf。
++    tenants_file: str = ""
+ 
+     @classmethod
+     def from_env(cls) -> Settings:
+@@ -38,6 +41,10 @@ class Settings:
+             audit_log_dir=os.getenv("MEMORY_AUDIT_LOG_DIR", call_log_dir),
+             query_prefix=os.getenv("MEMORY_QUERY_PREFIX", ""),
+             tenants_raw=os.getenv("MEMOS_TENANTS", ""),
++            tenants_file=os.getenv(
++                "MEMOS_TENANTS_FILE",
++                str(Path(__file__).resolve().parent.parent / "tenants.conf"),
++            ),
+             started_at=time.time(),
+         )
+ 
+diff --git a/deploy/mcp-gateway/gateway/domain/tenants.py b/deploy/mcp-gateway/gateway/domain/tenants.py
+index c649408..6d0b118 100644
+--- a/deploy/mcp-gateway/gateway/domain/tenants.py
++++ b/deploy/mcp-gateway/gateway/domain/tenants.py
+@@ -3,7 +3,12 @@
+ from __future__ import annotations
+ 
+ import json
++import os
++import threading
++
++from contextlib import contextmanager
+ from dataclasses import dataclass
++from pathlib import Path
+ 
+ 
+ @dataclass(frozen=True)
+@@ -12,7 +17,7 @@ class Tenant:
+     cube_id: str
+ 
+ 
+-def parse_tenants(raw: str) -> dict[str, Tenant]:
++def _parse_tenants(raw: str) -> dict[str, Tenant]:
+     """把 MEMOS_TENANTS 解析成 {token: Tenant}。"""
+     raw = (raw or "").strip()
+     if not raw:
+@@ -23,10 +28,13 @@ def parse_tenants(raw: str) -> dict[str, Tenant]:
+         for token, spec in data.items():
+             if isinstance(spec, str):
+                 spec = {"user_id": spec}
+-            uid = (spec or {}).get("user_id")
+-            if not uid:
+-                raise ValueError(f"tenant '{token}' has no user_id")
+-            out[token] = Tenant(user_id=uid, cube_id=spec.get("cube_id") or uid)
++            if not isinstance(spec, dict) or not isinstance(token, str) or not token:
++                raise ValueError("Invalid tenant entry")
++            uid = spec.get("user_id")
++            cube = spec.get("cube_id") or uid
++            if not isinstance(uid, str) or not uid or not isinstance(cube, str):
++                raise ValueError("Tenant entry has no valid user_id/cube_id")
++            out[token] = Tenant(user_id=uid, cube_id=cube)
+         return out
+     # 紧凑写法 tok:user_id,tok2:user_id2
+     # 用 rpartition 而不是 partition：token 里万一出现冒号也不会把映射切错，
+@@ -44,6 +52,83 @@ def parse_tenants(raw: str) -> dict[str, Tenant]:
+     return out
+ 
+ 
++def parse_tenants(raw: str) -> dict[str, Tenant]:
++    """Parse credentials without ever echoing source data in an exception."""
++    try:
++        return _parse_tenants(raw)
++    except (ValueError, TypeError, AttributeError):
++        raise ValueError(
++            "Invalid tenant configuration; expected token-to-identity mappings"
++        ) from None
++
++
++@contextmanager
++def _manifest_lock(path: Path, *, blocking: bool = True):
++    # Shared protocol with dashboard.key_store.manifest_lock; lock the first byte.
++    with path.with_name(path.name + ".lock").open("a+b") as handle:
++        handle.seek(0, os.SEEK_END)
++        if not handle.tell():
++            handle.write(b"0")
++            handle.flush()
++        handle.seek(0)
++        if os.name == "nt":
++            import msvcrt
++
++            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
++        else:
++            import fcntl
++
++            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
++        try:
++            yield
++        finally:
++            handle.seek(0)
++            if os.name == "nt":
++                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
++            else:
++                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
++
++
++def load_tenants_file(
++    path: str | os.PathLike[str] | None, *, blocking: bool = True
++) -> dict[str, Tenant]:
++    """Load only a confirmed publication, never a precommit or unreconciled file."""
++    if not path:
++        return {}
++    path = Path(path)
++    if not path.parent.exists():
++        return {}
++    with _manifest_lock(path, blocking=blocking):
++        if path.with_name(path.name + ".pending").exists():
++            raise ValueError(
++                "Tenant configuration awaits dashboard reconciliation; refusing startup"
++            )
++        try:
++            text = path.read_text(encoding="utf-8")
++        except FileNotFoundError:
++            return {}
++        return parse_tenants(text)
++
++
++def merge_tenants(
++    base: dict[str, Tenant], extra: dict[str, Tenant], *, extra_source: str
++) -> dict[str, Tenant]:
++    """env 为主、dashboard 文件为辅；同 token 但身份不同 → 拒绝启动，点名双来源。
++
++    错误信息只带 token 掩码，绝不落 token 明文。
++    """
++    merged = dict(base)
++    for token, tenant in extra.items():
++        clash = merged.get(token)
++        if clash is not None and clash != tenant:
++            raise ValueError(
++                f"tenant token conflict between MEMOS_TENANTS and {extra_source}: "
++                f"token {mask_token(token)}"
++            )
++        merged[token] = tenant
++    return merged
++
++
+ def mask_token(token: str | None) -> str | None:
+     """token 掩码：前 12 + 后 4。"""
+     if not token:
+@@ -55,7 +140,61 @@ def mask_token(token: str | None) -> str | None:
+ 
+ class TenantRegistry:
+     def __init__(self, mapping: dict[str, Tenant]):
+-        self._by_token = mapping
++        self._by_token = dict(mapping)
++        self._base = dict(mapping)
++        self._path: Path | None = None
++        self._version = None
++        self._refresh_lock = threading.Lock()
++
++    @classmethod
++    def from_sources(cls, raw: str, path: str | os.PathLike[str] | None) -> TenantRegistry:
++        """Static environment identities plus a revocable, atomically published file."""
++        registry = cls(parse_tenants(raw))
++        registry._path = Path(path) if path else None
++        registry._refresh(strict=True)
++        return registry
++
++    @staticmethod
++    def _stat(path: Path) -> tuple | None:
++        try:
++            stat = path.stat()
++        except FileNotFoundError:
++            return None
++        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
++
++    def _signature(self) -> tuple:
++        path = self._path
++        return self._stat(path), self._stat(path.with_name(path.name + ".pending"))
++
++    def _refresh(self, *, strict: bool = False) -> None:
++        if self._path is None:
++            return
++        with self._refresh_lock:
++            try:
++                before = self._signature()
++                if before == self._version:
++                    return
++                extra = load_tenants_file(self._path, blocking=strict)
++                after = self._signature()
++                if before != after:
++                    raise ValueError("Tenant publication changed during reload")
++                merged = merge_tenants(self._base, extra, extra_source="tenants.conf")
++                self._by_token = merged  # replace one immutable snapshot, never mutate it
++                self._version = after
++            except (OSError, ValueError, UnicodeError):
++                # Retaining a stale file snapshot would also retain revoked keys.
++                self._by_token = dict(self._base)
++                self._version = None  # retry even if the unreadable file stat is unchanged
++                if strict:
++                    raise ValueError("Tenant configuration unavailable or unconfirmed") from None
++
++    def authenticate(self, token: str | None) -> Tenant | None:
++        """Refresh before each auth decision; execute this disk work off the event loop."""
++        # Keep refresh + lookup linearizable across concurrent verifier threads.
++        # _refresh owns the lock; the returned immutable snapshot remains valid for
++        # this decision even if another request publishes the next one afterwards.
++        self._refresh()
++        return self.get(token)
+ 
+     @classmethod
+     def from_raw(cls, raw: str) -> TenantRegistry:
+diff --git a/deploy/mcp-gateway/gateway/live_auth.py b/deploy/mcp-gateway/gateway/live_auth.py
+new file mode 100644
+--- /dev/null
++++ b/deploy/mcp-gateway/gateway/live_auth.py
+@@ -0,0 +1,30 @@
++"""Request-time file change detection; no static token cache survives revocation."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
++from anyio import to_thread
++from fastmcp.server.auth import AccessToken, TokenVerifier
++
++
++if TYPE_CHECKING:
++    from .domain.tenants import TenantRegistry
++
++
++class ReloadingTokenVerifier(TokenVerifier):
++    def __init__(self, tenants: TenantRegistry):
++        super().__init__()
++        self._tenants = tenants
++
++    async def verify_token(self, token: str) -> AccessToken | None:
++        tenant = await to_thread.run_sync(self._tenants.authenticate, token)
++        if tenant is None:
++            return None
++        claims = {
++            "client_id": tenant.user_id,
++            "scopes": ["memory"],
++            "user_id": tenant.user_id,
++            "cube_id": tenant.cube_id,
++        }
++        return AccessToken(token=token, client_id=tenant.user_id, scopes=["memory"], claims=claims)
+diff --git a/deploy/mcp-gateway/test_gateway_tenants_file.py b/deploy/mcp-gateway/test_gateway_tenants_file.py
+new file mode 100644
+--- /dev/null
++++ b/deploy/mcp-gateway/test_gateway_tenants_file.py
+@@ -0,0 +1,121 @@
++#!/usr/bin/env python3
++"""Task 14 RED：网关侧 tenants.conf（dashboard 合成下发）的读取与合并。
++
++不依赖 fastmcp、不起服务。跑法：
++
++    python test_gateway_tenants_file.py
++"""
++
++from __future__ import annotations
++
++import pathlib
++import tempfile
++import unittest
++
++from gateway.domain.tenants import load_tenants_file, merge_tenants, parse_tenants
++
++
++class LoadTenantsFile(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.dir = pathlib.Path(self.tmp.name)
++
++    def tearDown(self):
++        self.tmp.cleanup()
++
++    def write(self, text, name="tenants.conf"):
++        path = self.dir / name
++        path.write_text(text, encoding="utf-8")
++        return path
++
++    def test_missing_file_is_empty(self):
++        self.assertEqual(load_tenants_file(self.dir / "absent.conf"), {})
++
++    def test_file_json_same_shape_as_env(self):
++        path = self.write('{"tok-a": {"user_id": "a", "cube_id": "c"}, "tok-b": "b"}')
++        parsed = load_tenants_file(path)
++        self.assertEqual(parsed["tok-a"].user_id, "a")
++        self.assertEqual(parsed["tok-a"].cube_id, "c")
++        self.assertEqual(parsed["tok-b"].user_id, "b")
++        self.assertEqual(parsed["tok-b"].cube_id, "b")
++
++    def test_bad_json_raises_valueerror(self):
++        path = self.write("{not json")
++        with self.assertRaises(ValueError):
++            load_tenants_file(path)
++
++    def test_merge_disjoint_sources(self):
++        base = parse_tenants("env-tok:alice")
++        path = self.write('{"file-tok": {"user_id": "bob", "cube_id": "bob"}}')
++        merged = merge_tenants(base, load_tenants_file(path), extra_source="tenants.conf")
++        self.assertEqual(merged["env-tok"].user_id, "alice")
++        self.assertEqual(merged["file-tok"].user_id, "bob")
++        self.assertEqual(len(merged), 2)
++
++    def test_merge_conflict_names_both_sources_without_token_plaintext(self):
++        base = parse_tenants("same-tok:alice")
++        path = self.write('{"same-tok": {"user_id": "mallory", "cube_id": "mallory"}}')
++        with self.assertRaises(ValueError) as caught:
++            merge_tenants(base, load_tenants_file(path), extra_source="tenants.conf")
++        message = str(caught.exception)
++        self.assertIn("MEMOS_TENANTS", message)
++        self.assertIn("tenants.conf", message)
++        self.assertNotIn("same-tok", message)
++
++    def test_merge_identical_entry_dedupes(self):
++        base = parse_tenants("same-tok:alice")
++        path = self.write('{"same-tok": {"user_id": "alice", "cube_id": "alice"}}')
++        merged = merge_tenants(base, load_tenants_file(path), extra_source="tenants.conf")
++        self.assertEqual(len(merged), 1)
++        self.assertEqual(merged["same-tok"].user_id, "alice")
++
++    def test_invalid_config_never_exposes_token(self):
++        token = "sk-" + "x" * 48
++        for raw in ('{"' + token + '":{}}', token, '{"' + token + '":[1]}'):
++            try:
++                parse_tenants(raw)
++            except ValueError as error:
++                self.assertFalse(token in str(error))
++            else:
++                self.fail("Malformed credential configuration was accepted")
++
++    def test_pending_manifest_is_rejected(self):
++        path = self.write("{}")
++        path.with_name(path.name + ".pending").write_text("pending")
++        with self.assertRaises(ValueError):
++            load_tenants_file(path)
++
++    def test_reader_waits_for_publication_lock(self):
++        import threading
++
++        from gateway.domain.tenants import _manifest_lock
++
++        path = self.write("{}")
++        started, done = threading.Event(), threading.Event()
++        failures = []
++
++        def read():
++            started.set()
++            try:
++                load_tenants_file(path)
++            except Exception as error:
++                failures.append(type(error).__name__)
++            finally:
++                done.set()
++
++        with _manifest_lock(path):
++            reader = threading.Thread(target=read)
++            reader.start()
++            self.assertTrue(started.wait(2))
++            self.assertFalse(done.wait(0.1))
++        reader.join(4)
++        self.assertTrue(done.is_set())
++        self.assertEqual(failures, [])
++
++    def test_legacy_null_cube_still_defaults_to_user(self):
++        parsed = parse_tenants('{"legacy": {"user_id":"a", "cube_id":null}}')
++        self.assertEqual(parsed["legacy"].cube_id, "a")
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+diff --git a/deploy/mcp-gateway/test_gateway_live_reload.py b/deploy/mcp-gateway/test_gateway_live_reload.py
+new file mode 100644
+--- /dev/null
++++ b/deploy/mcp-gateway/test_gateway_live_reload.py
+@@ -0,0 +1,217 @@
++"""Credential publications become effective on the next authenticated HTTP request."""
++
++from __future__ import annotations
++
++import asyncio
++import json
++import os
++import sys
++
++from dataclasses import replace
++from pathlib import Path
++
++import pytest
++
++from starlette.testclient import TestClient
++
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++from gateway.app import build_app
++from gateway.config import settings
++from gateway.domain.tenants import TenantRegistry
++
++
++def publish(path, values):
++    temporary = path.with_suffix(".next")
++    temporary.write_text(json.dumps(values), encoding="utf-8")
++    os.replace(temporary, path)
++
++
++def registry(path):
++    return TenantRegistry.from_sources("env-token:operator", str(path))
++
++
++def test_add_revoke_and_identity_remap(tmp_path):
++    path = tmp_path / "tenants.conf"
++    publish(path, {"first": "alice"})
++    tenants = registry(path)
++    assert tenants.authenticate("first").user_id == "alice"
++    publish(path, {"second": {"user_id": "bob", "cube_id": "team-b"}})
++    assert tenants.authenticate("first") is None
++    assert tenants.authenticate("second").cube_id == "team-b"
++    assert tenants.get("second").user_id == "bob"  # audit shares the live snapshot
++    publish(path, {"second": "carol"})
++    assert tenants.authenticate("second").user_id == "carol"
++    assert tenants.authenticate("env-token").user_id == "operator"
++
++
++@pytest.mark.parametrize("failure", ["invalid", "pending", "missing", "conflict"])
++def test_bad_publication_fails_closed_and_recovers(tmp_path, failure):
++    path = tmp_path / "tenants.conf"
++    publish(path, {"first": "alice"})
++    tenants = registry(path)
++    if failure == "invalid":
++        path.write_text('{"credential-secret":', encoding="utf-8")
++    elif failure == "pending":
++        path.with_name(path.name + ".pending").write_text("pending")
++    elif failure == "missing":
++        path.unlink()
++    else:
++        publish(path, {"env-token": "mallory"})
++    assert tenants.authenticate("first") is None
++    assert tenants.authenticate("credential-secret") is None
++    assert tenants.authenticate("env-token").user_id == "operator"
++    path.with_name(path.name + ".pending").unlink(missing_ok=True)
++    publish(path, {"second": "bob"})
++    assert tenants.authenticate("second").user_id == "bob"
++    assert tenants.authenticate("first") is None
++
++
++def test_unchanged_file_is_not_reparsed_and_same_mtime_replacement_detected(tmp_path, monkeypatch):
++    import gateway.domain.tenants as module
++
++    path = tmp_path / "tenants.conf"
++    publish(path, {"first": "alice"})
++    tenants = registry(path)
++    original = module.parse_tenants
++    calls = []
++
++    def parse(value):
++        calls.append(True)
++        return original(value)
++
++    monkeypatch.setattr(module, "parse_tenants", parse)
++    for _ in range(10):
++        assert tenants.authenticate("first")
++    assert calls == []
++    timestamp = path.stat().st_mtime_ns
++    publish(path, {"other": "bobby"})
++    os.utime(path, ns=(timestamp, timestamp))
++    assert tenants.authenticate("other").user_id == "bobby"
++    assert calls == [True]
++
++
++def test_file_read_failure_revokes_cached_file_keys(tmp_path, monkeypatch):
++    import gateway.domain.tenants as module
++
++    path = tmp_path / "tenants.conf"
++    publish(path, {"first": "alice"})
++    tenants = registry(path)
++    publish(path, {"second": "bob"})
++    original = module.load_tenants_file
++
++    def denied(*args, **kwargs):
++        raise PermissionError("sensitive source must not escape")
++
++    monkeypatch.setattr(module, "load_tenants_file", denied)
++    assert tenants.authenticate("first") is None
++    assert tenants.authenticate("env-token")
++    monkeypatch.setattr(module, "load_tenants_file", original)
++    assert tenants.authenticate("second")
++
++
++def test_publication_lock_does_not_block_auth_and_recovers(tmp_path):
++    from gateway.domain.tenants import _manifest_lock
++
++    path = tmp_path / "tenants.conf"
++    publish(path, {"first": "alice"})
++    tenants = registry(path)
++    marker = path.with_name(path.name + ".pending")
++    with _manifest_lock(path):
++        marker.write_text("pending")
++        publish(path, {"second": "bob"})
++        assert tenants.authenticate("first") is None
++        assert tenants.authenticate("second") is None
++        assert tenants.authenticate("env-token")
++        marker.unlink()
++    assert tenants.authenticate("second")
++
++
++def test_change_between_read_and_stat_never_accepts_mixed_publication(tmp_path, monkeypatch):
++    import gateway.domain.tenants as module
++
++    path = tmp_path / "tenants.conf"
++    publish(path, {"first": "alice"})
++    tenants = registry(path)
++    original = module.load_tenants_file
++    publish(path, {"second": "bob"})
++
++    def racing(*args, **kwargs):
++        loaded = original(*args, **kwargs)
++        publish(path, {"third": "carol"})
++        return loaded
++
++    monkeypatch.setattr(module, "load_tenants_file", racing)
++    assert tenants.authenticate("second") is None
++    monkeypatch.setattr(module, "load_tenants_file", original)
++    assert tenants.authenticate("third").user_id == "carol"
++
++
++def test_empty_startup_stays_authenticated_and_live_http_rechecks_each_request(tmp_path):
++    path = tmp_path / "tenants.conf"
++    publish(path, {})
++    app = build_app(
++        replace(
++            settings,
++            tenants_raw="",
++            tenants_file=str(path),
++            call_log_dir=str(tmp_path / "calls"),
++            audit_log_dir=str(tmp_path / "audit"),
++        )
++    )
++    rpc = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
++    with TestClient(app.mcp.http_app(middleware=[app.http_middleware()])) as web:
++
++        def request(token):
++            return web.post(
++                "/mcp",
++                json=rpc,
++                headers={
++                    "Authorization": "Bearer " + token,
++                    "Accept": "application/json, text/event-stream",
++                },
++            )
++
++        assert web.post("/mcp", json=rpc).status_code == 401
++        assert request("first").status_code == 401
++        publish(path, {"first": "alice"})
++        assert request("first").status_code == 200
++        publish(path, {})
++        assert request("first").status_code == 401
++        publish(path, {"second": "bob"})
++        assert request("second").status_code == 200
++        assert request("first").status_code == 401
++
++
++def test_auth_disk_work_does_not_block_event_loop(tmp_path, monkeypatch):
++    import threading
++
++    from gateway.live_auth import ReloadingTokenVerifier
++
++    path = tmp_path / "tenants.conf"
++    publish(path, {"first": "alice"})
++    tenants = registry(path)
++    entered, released = threading.Event(), threading.Event()
++    original = tenants.authenticate
++
++    def slow(token):
++        entered.set()
++        assert released.wait(3)
++        return original(token)
++
++    monkeypatch.setattr(tenants, "authenticate", slow)
++
++    async def run():
++        task = asyncio.create_task(ReloadingTokenVerifier(tenants).verify_token("first"))
++        for _ in range(100):
++            if entered.is_set():
++                break
++            await asyncio.sleep(0.001)
++        try:
++            assert entered.is_set() and not task.done()
++        finally:
++            released.set()
++        assert (await task).claims["user_id"] == "alice"
++
++    asyncio.run(run())
